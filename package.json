@@ -1,0 +1,23 @@
+{
+  "name": "learn-claude-code-ts",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "s01": "bun run agents/s01_agent_loop.ts",
+    "s02": "bun run agents/s02_tool_use.ts",
+    "s03": "bun run agents/s03_todo_write.ts",
+    "s01:node": "tsx agents/s01_agent_loop.ts",
+    "s02:node": "tsx agents/s02_tool_use.ts",
+    "s03:node": "tsx agents/s03_todo_write.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
