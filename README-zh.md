@@ -11,7 +11,7 @@
 ## 快速开始
 
 ```sh
-git clone https://github.com/<your-username>/learn-claude-code-ts
+git clone https://github.com/JinSooo/learn-claude-code-ts
 cd learn-claude-code-ts
 bun install               # 或: npm install
 cp .env.example .env      # 编辑 .env，填入你的 ANTHROPIC_API_KEY

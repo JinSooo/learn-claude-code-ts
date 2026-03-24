@@ -11,7 +11,7 @@ Original project is in Python. This repo ports it to TypeScript for frontend dev
 ## Quick Start
 
 ```sh
-git clone https://github.com/<your-username>/learn-claude-code-ts
+git clone https://github.com/JinSooo/learn-claude-code-ts
 cd learn-claude-code-ts
 bun install               # or: npm install
 cp .env.example .env      # Edit .env with your ANTHROPIC_API_KEY
