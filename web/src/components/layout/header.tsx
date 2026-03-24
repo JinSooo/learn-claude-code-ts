@@ -25,11 +25,14 @@ export function Header() {
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Sync dark state from DOM after mount (SSR-safe)
+  // Sync dark state from localStorage and keep DOM in sync
   const [dark, setDark] = useState(false);
   useEffect(() => {
-    setDark(document.documentElement.classList.contains("dark"));
-  }, []);
+    const stored = localStorage.getItem("theme");
+    const isDark = stored === "dark" || (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    setDark(isDark);
+    document.documentElement.classList.toggle("dark", isDark);
+  }, [pathname]);
 
   function toggleDark() {
     const next = !dark;
