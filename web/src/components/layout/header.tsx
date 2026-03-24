@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useTranslations, useLocale } from "@/lib/i18n";
 import { Github, Menu, X, Sun, Moon } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
@@ -22,15 +22,14 @@ export function Header() {
   const t = useTranslations("nav");
   const pathname = usePathname();
   const locale = useLocale();
+  const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [dark, setDark] = useState(() => {
-    if (typeof window !== "undefined") {
-      const stored = localStorage.getItem("theme");
-      if (stored) return stored === "dark";
-      return window.matchMedia("(prefers-color-scheme: dark)").matches;
-    }
-    return false;
-  });
+
+  // Sync dark state from DOM after mount (SSR-safe)
+  const [dark, setDark] = useState(false);
+  useEffect(() => {
+    setDark(document.documentElement.classList.contains("dark"));
+  }, []);
 
   function toggleDark() {
     const next = !dark;
@@ -41,7 +40,7 @@ export function Header() {
 
   function switchLocale(newLocale: string) {
     const newPath = pathname.replace(`/${locale}`, `/${newLocale}`);
-    window.location.href = newPath;
+    router.push(newPath);
   }
 
   return (
@@ -94,7 +93,7 @@ export function Header() {
           </button>
 
           <a
-            href="https://github.com/shareAI-lab/learn-claude-code-ts"
+            href="https://github.com/JinSooo/learn-claude-code-ts"
             target="_blank"
             rel="noopener"
             className="text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-white"
@@ -150,7 +149,7 @@ export function Header() {
                 {dark ? <Sun size={18} /> : <Moon size={18} />}
               </button>
               <a
-                href="https://github.com/shareAI-lab/learn-claude-code-ts"
+                href="https://github.com/JinSooo/learn-claude-code-ts"
                 target="_blank"
                 rel="noopener"
                 className="flex min-h-[44px] min-w-[44px] items-center justify-center text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-white"
