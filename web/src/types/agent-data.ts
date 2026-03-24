@@ -25,7 +25,7 @@ export interface VersionDiff {
 
 export interface DocContent {
   version: string;
-  locale: "en";
+  locale: "en" | "zh";
   title: string;
   content: string; // raw markdown
 }

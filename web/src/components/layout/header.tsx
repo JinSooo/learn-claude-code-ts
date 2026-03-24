@@ -15,6 +15,7 @@ const NAV_ITEMS = [
 
 const LOCALES = [
   { code: "en", label: "EN" },
+  { code: "zh", label: "中文" },
 ];
 
 export function Header() {

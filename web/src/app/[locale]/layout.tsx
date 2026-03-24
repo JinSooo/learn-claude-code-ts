@@ -2,9 +2,11 @@ import type { Metadata } from "next";
 import { I18nProvider } from "@/lib/i18n";
 import { Header } from "@/components/layout/header";
 import en from "@/i18n/messages/en.json";
+import zh from "@/i18n/messages/zh.json";
 import "../globals.css";
 
-const locales = ["en"];
+const locales = ["en", "zh"];
+const messages: Record<string, typeof en> = { en, zh };
 
 export function generateStaticParams() {
   return locales.map((locale) => ({ locale }));
@@ -29,9 +31,10 @@ export default async function RootLayout({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = await params;
+  const msg = messages[locale] || en;
 
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang={locale} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: `
           (function() {
@@ -43,7 +46,7 @@ export default async function RootLayout({
         `}} />
       </head>
       <body className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)] antialiased">
-        <I18nProvider locale="en">
+        <I18nProvider locale={locale}>
           <Header />
           <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
             {children}

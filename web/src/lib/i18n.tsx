@@ -1,8 +1,11 @@
 "use client";
 import { createContext, useContext, ReactNode } from "react";
 import en from "@/i18n/messages/en.json";
+import zh from "@/i18n/messages/zh.json";
 
 type Messages = typeof en;
+
+const allMessages: Record<string, Messages> = { en, zh };
 
 const I18nContext = createContext<{ locale: string; messages: Messages }>({
   locale: "en",
@@ -10,8 +13,9 @@ const I18nContext = createContext<{ locale: string; messages: Messages }>({
 });
 
 export function I18nProvider({ locale, children }: { locale: string; children: ReactNode }) {
+  const messages = allMessages[locale] || en;
   return (
-    <I18nContext.Provider value={{ locale: "en", messages: en }}>
+    <I18nContext.Provider value={{ locale, messages }}>
       {children}
     </I18nContext.Provider>
   );
@@ -27,5 +31,6 @@ export function useTranslations(namespace?: string) {
 }
 
 export function useLocale() {
-  return "en";
+  const { locale } = useContext(I18nContext);
+  return locale;
 }
