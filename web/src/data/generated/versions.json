@@ -1,0 +1,1009 @@
+{
+  "versions": [
+    {
+      "id": "s01",
+      "filename": "s01_agent_loop.ts",
+      "title": "The Agent Loop",
+      "subtitle": "Bash is All You Need",
+      "loc": 123,
+      "tools": [
+        "bash"
+      ],
+      "newTools": [
+        "bash"
+      ],
+      "coreAddition": "Single-tool agent loop",
+      "keyInsight": "The minimal agent kernel is a while loop + one tool",
+      "classes": [],
+      "functions": [
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 57
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 84
+        }
+      ],
+      "layer": "tools",
+      "source": "/**\n * s01_agent_loop.ts - The Agent Loop\n *\n * The entire secret of an AI coding agent in one pattern:\n *\n *     while (stopReason === \"tool_use\") {\n *       response = LLM(messages, tools)\n *       execute tools\n *       append results\n *     }\n *\n *     +----------+      +-------+      +---------+\n *     |   User   | ---> |  LLM  | ---> |  Tool   |\n *     |  prompt  |      |       |      | execute |\n *     +----------+      +---+---+      +----+----+\n *                            ^               |\n *                            |   tool_result |\n *                            +---------------+\n *                            (loop continues)\n *\n * This is the core loop: feed tool results back to the model\n * until the model decides to stop. Production agents layer\n * policy, hooks, and lifecycle controls on top.\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { createInterface } from \"node:readline\";\n\n// Bun loads .env natively; Node needs dotenv\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\n\nconst SYSTEM = `You are a coding agent at ${process.cwd()}. Use bash to solve tasks. Act, don't explain.`;\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  {\n    name: \"bash\",\n    description: \"Run a shell command.\",\n    input_schema: {\n      type: \"object\" as const,\n      properties: { command: { type: \"string\" } },\n      required: [\"command\"],\n    },\n  },\n];\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) {\n    return \"Error: Dangerous command blocked\";\n  }\n  try {\n    const stdout = execSync(command, {\n      cwd: process.cwd(),\n      shell: \"/bin/sh\",\n      timeout: 120_000,\n      maxBuffer: 10 * 1024 * 1024,\n      encoding: \"utf-8\",\n      stdio: [\"pipe\", \"pipe\", \"pipe\"],\n    });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) {\n      return \"Error: Timeout (120s)\";\n    }\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\n// -- The core pattern: a while loop that calls tools until the model stops --\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL,\n      system: SYSTEM,\n      messages,\n      tools: TOOLS,\n      max_tokens: 8000,\n    });\n\n    // Append assistant turn\n    messages.push({ role: \"assistant\", content: response.content });\n\n    // If the model didn't call a tool, we're done\n    if (response.stop_reason !== \"tool_use\") {\n      return;\n    }\n\n    // Execute each tool call, collect results\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const input = block.input as { command: string };\n        console.log(`\\x1b[33m$ ${input.command}\\x1b[0m`);\n        const output = runBash(input.command);\n        console.log(output.slice(0, 200));\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: output });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms01 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") {\n      rl.close();\n      return;\n    }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n\n    // Print final assistant response\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") {\n          console.log(block.text);\n        }\n      }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s02",
+      "filename": "s02_tool_use.ts",
+      "title": "Tools",
+      "subtitle": "One Handler Per Tool",
+      "loc": 162,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file"
+      ],
+      "newTools": [
+        "read_file",
+        "write_file",
+        "edit_file"
+      ],
+      "coreAddition": "Tool dispatch map",
+      "keyInsight": "The loop stays the same; new tools register into the dispatch map",
+      "classes": [],
+      "functions": [
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 44
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 52
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 78
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 91
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 102
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 139
+        }
+      ],
+      "layer": "tools",
+      "source": "/**\n * s02_tool_use.ts - Tools\n *\n * The agent loop from s01 didn't change. We just added tools to the array\n * and a dispatch map to route calls.\n *\n *     +----------+      +-------+      +------------------+\n *     |   User   | ---> |  LLM  | ---> | Tool Dispatch    |\n *     |  prompt  |      |       |      | {                |\n *     +----------+      +---+---+      |   bash: runBash  |\n *                            ^         |   read: runRead  |\n *                            |         |   write: runWrite|\n *                            +---------+   edit: runEdit  |\n *                            tool_result| }               |\n *                                      +------------------+\n *\n * Key insight: \"The loop didn't change at all. I just added tools.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync } from \"node:fs\";\nimport { resolve, dirname } from \"node:path\";\nimport { createInterface } from \"node:readline\";\n\n// Bun loads .env natively; Node needs dotenv\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\n\nconst SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.`;\n\n// -- Tool implementations --\n\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) {\n    throw new Error(`Path escapes workspace: ${p}`);\n  }\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) {\n    return \"Error: Dangerous command blocked\";\n  }\n  try {\n    const stdout = execSync(command, {\n      cwd: WORKDIR,\n      shell: \"/bin/sh\",\n      timeout: 120_000,\n      maxBuffer: 10 * 1024 * 1024,\n      encoding: \"utf-8\",\n      stdio: [\"pipe\", \"pipe\", \"pipe\"],\n    });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) {\n      return \"Error: Timeout (120s)\";\n    }\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) {\n      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];\n    }\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) {\n    return `Error: ${e instanceof Error ? e.message : e}`;\n  }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes to ${path}`;\n  } catch (e: unknown) {\n    return `Error: ${e instanceof Error ? e.message : e}`;\n  }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) {\n      return `Error: Text not found in ${path}`;\n    }\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) {\n    return `Error: ${e instanceof Error ? e.message : e}`;\n  }\n}\n\n// -- The dispatch map: {tool_name: handler} --\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:       (input) => runBash(input.command as string),\n  read_file:  (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file: (input) => runWrite(input.path as string, input.content as string),\n  edit_file:  (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n];\n\n// -- Agent loop (unchanged from s01, just uses dispatch map) --\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        const output = handler\n          ? handler(block.input as ToolInput)\n          : `Unknown tool: ${block.name}`;\n        console.log(`> ${block.name}: ${output.slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: output });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms02 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") {\n      rl.close();\n      return;\n    }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") console.log(block.text);\n      }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s03",
+      "filename": "s03_todo_write.ts",
+      "title": "TodoWrite",
+      "subtitle": "Plan Before You Act",
+      "loc": 232,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "todo"
+      ],
+      "newTools": [
+        "todo"
+      ],
+      "coreAddition": "TodoManager + nag reminder",
+      "keyInsight": "An agent without a plan drifts; list the steps first, then execute",
+      "classes": [
+        {
+          "name": "TodoManager",
+          "startLine": 60,
+          "endLine": 103
+        }
+      ],
+      "functions": [
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 109
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 117
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 143
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 156
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 167
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 207
+        }
+      ],
+      "layer": "planning",
+      "source": "/**\n * s03_todo_write.ts - TodoWrite\n *\n * The model tracks its own progress via a TodoManager. A nag reminder\n * forces it to keep updating when it forgets.\n *\n *     +----------+      +-------+      +---------+\n *     |   User   | ---> |  LLM  | ---> | Tools   |\n *     |  prompt  |      |       |      | + todo  |\n *     +----------+      +---+---+      +----+----+\n *                            ^               |\n *                            |   tool_result |\n *                            +---------------+\n *                                  |\n *                      +-----------+-----------+\n *                      | TodoManager state     |\n *                      | [ ] task A            |\n *                      | [>] task B <- doing   |\n *                      | [x] task C            |\n *                      +-----------------------+\n *                                  |\n *                      if rounds_since_todo >= 3:\n *                        inject <reminder>\n *\n * Key insight: \"The agent can track its own progress -- and I can see it.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync } from \"node:fs\";\nimport { resolve, dirname } from \"node:path\";\nimport { createInterface } from \"node:readline\";\n\n// Bun loads .env natively; Node needs dotenv\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\n\nconst SYSTEM = `You are a coding agent at ${WORKDIR}.\nUse the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.\nPrefer tools over prose.`;\n\n// -- TodoManager: structured state the LLM writes to --\n\ninterface TodoItem {\n  id: string;\n  text: string;\n  status: \"pending\" | \"in_progress\" | \"completed\";\n}\n\nclass TodoManager {\n  items: TodoItem[] = [];\n\n  update(items: unknown[]): string {\n    if (items.length > 20) {\n      throw new Error(\"Max 20 todos allowed\");\n    }\n    const validated: TodoItem[] = [];\n    let inProgressCount = 0;\n\n    for (let i = 0; i < items.length; i++) {\n      const item = items[i] as Record<string, unknown>;\n      const text = String(item.text ?? \"\").trim();\n      const status = String(item.status ?? \"pending\").toLowerCase();\n      const id = String(item.id ?? String(i + 1));\n\n      if (!text) {\n        throw new Error(`Item ${id}: text required`);\n      }\n      if (![\"pending\", \"in_progress\", \"completed\"].includes(status)) {\n        throw new Error(`Item ${id}: invalid status '${status}'`);\n      }\n      if (status === \"in_progress\") {\n        inProgressCount++;\n      }\n      validated.push({ id, text, status: status as TodoItem[\"status\"] });\n    }\n\n    if (inProgressCount > 1) {\n      throw new Error(\"Only one task can be in_progress at a time\");\n    }\n    this.items = validated;\n    return this.render();\n  }\n\n  render(): string {\n    if (this.items.length === 0) return \"No todos.\";\n    const markers: Record<string, string> = { pending: \"[ ]\", in_progress: \"[>]\", completed: \"[x]\" };\n    const lines = this.items.map((item) => `${markers[item.status]} #${item.id}: ${item.text}`);\n    const done = this.items.filter((t) => t.status === \"completed\").length;\n    lines.push(`\\n(${done}/${this.items.length} completed)`);\n    return lines.join(\"\\n\");\n  }\n}\n\nconst TODO = new TodoManager();\n\n// -- Tool implementations --\n\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) {\n    throw new Error(`Path escapes workspace: ${p}`);\n  }\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) {\n    return \"Error: Dangerous command blocked\";\n  }\n  try {\n    const stdout = execSync(command, {\n      cwd: WORKDIR,\n      shell: \"/bin/sh\",\n      timeout: 120_000,\n      maxBuffer: 10 * 1024 * 1024,\n      encoding: \"utf-8\",\n      stdio: [\"pipe\", \"pipe\", \"pipe\"],\n    });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) {\n      return \"Error: Timeout (120s)\";\n    }\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) {\n      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    }\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) {\n    return `Error: ${e instanceof Error ? e.message : e}`;\n  }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) {\n    return `Error: ${e instanceof Error ? e.message : e}`;\n  }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) {\n      return `Error: Text not found in ${path}`;\n    }\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) {\n    return `Error: ${e instanceof Error ? e.message : e}`;\n  }\n}\n\n// -- Dispatch map --\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:       (input) => runBash(input.command as string),\n  read_file:  (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file: (input) => runWrite(input.path as string, input.content as string),\n  edit_file:  (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  todo:       (input) => TODO.update(input.items as unknown[]),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"todo\", description: \"Update task list. Track progress on multi-step tasks.\",\n    input_schema: { type: \"object\" as const, properties: { items: { type: \"array\", items: { type: \"object\", properties: { id: { type: \"string\" }, text: { type: \"string\" }, status: { type: \"string\", enum: [\"pending\", \"in_progress\", \"completed\"] } }, required: [\"id\", \"text\", \"status\"] } } }, required: [\"items\"] } },\n];\n\n// -- Agent loop with nag reminder injection --\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  let roundsSinceTodo = 0;\n\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: (Anthropic.Messages.ToolResultBlockParam | Anthropic.Messages.TextBlockParam)[] = [];\n    let usedTodo = false;\n\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try {\n          output = handler\n            ? handler(block.input as ToolInput)\n            : `Unknown tool: ${block.name}`;\n        } catch (e: unknown) {\n          output = `Error: ${e instanceof Error ? e.message : e}`;\n        }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n        if (block.name === \"todo\") usedTodo = true;\n      }\n    }\n\n    roundsSinceTodo = usedTodo ? 0 : roundsSinceTodo + 1;\n    if (roundsSinceTodo >= 3) {\n      results.unshift({ type: \"text\", text: \"<reminder>Update your todos.</reminder>\" });\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms03 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") {\n      rl.close();\n      return;\n    }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if (block.type === \"text\") console.log(block.text);\n      }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s04",
+      "filename": "s04_subagent.ts",
+      "title": "Subagents",
+      "subtitle": "Clean Context Per Subtask",
+      "loc": 170,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "task"
+      ],
+      "newTools": [
+        "task"
+      ],
+      "coreAddition": "Subagent spawn with isolated messages[]",
+      "keyInsight": "Subagents use independent messages[], keeping the main conversation clean",
+      "classes": [],
+      "functions": [
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 48
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 54
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 69
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 78
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 87
+        },
+        {
+          "name": "runSubagent",
+          "signature": "async function runSubagent(prompt: string): Promise<string> {",
+          "startLine": 120
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 149
+        }
+      ],
+      "layer": "planning",
+      "source": "/**\n * s04_subagent.ts - Subagents\n *\n * Spawn a child agent with fresh messages=[]. The child works in its own\n * context, sharing the filesystem, then returns only a summary to the parent.\n *\n *     Parent agent                     Subagent\n *     +------------------+             +------------------+\n *     | messages=[...]   |             | messages=[]      |  <-- fresh\n *     |                  |  dispatch   |                  |\n *     | tool: task       | ---------->| while tool_use:  |\n *     |   prompt=\"...\"   |            |   call tools     |\n *     |   description=\"\" |            |   append results |\n *     |                  |  summary   |                  |\n *     |   result = \"...\" | <--------- | return last text |\n *     +------------------+             +------------------+\n *               |\n *     Parent context stays clean.\n *     Subagent context is discarded.\n *\n * Key insight: \"Process isolation gives context isolation for free.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync } from \"node:fs\";\nimport { resolve, dirname } from \"node:path\";\nimport { createInterface } from \"node:readline\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\n\nconst SYSTEM = `You are a coding agent at ${WORKDIR}. Use the task tool to delegate exploration or subtasks.`;\nconst SUBAGENT_SYSTEM = `You are a coding subagent at ${WORKDIR}. Complete the given task, then summarize your findings.`;\n\n// -- Tool implementations shared by parent and child --\n\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, { cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\", stdio: [\"pipe\", \"pipe\", \"pipe\"] });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:       (input) => runBash(input.command as string),\n  read_file:  (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file: (input) => runWrite(input.path as string, input.content as string),\n  edit_file:  (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n};\n\n// Child gets all base tools except task (no recursive spawning)\nconst CHILD_TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n];\n\n// -- Subagent: fresh context, filtered tools, summary-only return --\nasync function runSubagent(prompt: string): Promise<string> {\n  const subMessages: Anthropic.Messages.MessageParam[] = [{ role: \"user\", content: prompt }];\n  let response!: Anthropic.Messages.Message;\n  for (let i = 0; i < 30; i++) {\n    response = await client.messages.create({\n      model: MODEL, system: SUBAGENT_SYSTEM, messages: subMessages, tools: CHILD_TOOLS, max_tokens: 8000,\n    });\n    subMessages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") break;\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        const output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output).slice(0, 50_000) });\n      }\n    }\n    subMessages.push({ role: \"user\", content: results });\n  }\n  return response.content.filter((b) => b.type === \"text\").map((b) => b.type === \"text\" ? b.text : \"\").join(\"\") || \"(no summary)\";\n}\n\n// -- Parent tools: base tools + task dispatcher --\nconst PARENT_TOOLS: Anthropic.Messages.Tool[] = [\n  ...CHILD_TOOLS,\n  { name: \"task\", description: \"Spawn a subagent with fresh context. It shares the filesystem but not conversation history.\",\n    input_schema: { type: \"object\" as const, properties: { prompt: { type: \"string\" }, description: { type: \"string\", description: \"Short description of the task\" } }, required: [\"prompt\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: PARENT_TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        let output: string;\n        if (block.name === \"task\") {\n          const input = block.input as { prompt: string; description?: string };\n          console.log(`> task (${input.description ?? \"subtask\"}): ${input.prompt.slice(0, 80)}`);\n          output = await runSubagent(input.prompt);\n        } else {\n          const handler = TOOL_HANDLERS[block.name];\n          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        }\n        console.log(`  ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms04 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) { if (block.type === \"text\") console.log(block.text); }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s05",
+      "filename": "s05_skill_loading.ts",
+      "title": "Skills",
+      "subtitle": "Load on Demand",
+      "loc": 202,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "load_skill"
+      ],
+      "newTools": [
+        "load_skill"
+      ],
+      "coreAddition": "SkillLoader + two-layer injection",
+      "keyInsight": "Inject knowledge via tool_result when needed, not upfront in the system prompt",
+      "classes": [
+        {
+          "name": "SkillLoader",
+          "startLine": 55,
+          "endLine": 105
+        }
+      ],
+      "functions": [
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 117
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 123
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 138
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 147
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 156
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 190
+        }
+      ],
+      "layer": "planning",
+      "source": "/**\n * s05_skill_loading.ts - Skills\n *\n * Two-layer skill injection that avoids bloating the system prompt:\n *\n *     Layer 1 (cheap): skill names in system prompt (~100 tokens/skill)\n *     Layer 2 (on demand): full skill body in tool_result\n *\n *     skills/\n *       pdf/\n *         SKILL.md          <-- frontmatter (name, description) + body\n *       code-review/\n *         SKILL.md\n *\n *     System prompt:\n *     +--------------------------------------+\n *     | You are a coding agent.              |\n *     | Skills available:                    |\n *     |   - pdf: Process PDF files...        |  <-- Layer 1: metadata only\n *     |   - code-review: Review code...      |\n *     +--------------------------------------+\n *\n *     When model calls load_skill(\"pdf\"):\n *     +--------------------------------------+\n *     | tool_result:                         |\n *     | <skill>                              |\n *     |   Full PDF processing instructions   |  <-- Layer 2: full body\n *     | </skill>                             |\n *     +--------------------------------------+\n *\n * Key insight: \"Don't put everything in the system prompt. Load on demand.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from \"node:fs\";\nimport { resolve, dirname, join, basename } from \"node:path\";\nimport { createInterface } from \"node:readline\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\nconst SKILLS_DIR = join(WORKDIR, \"skills\");\n\n// -- SkillLoader: scan skills/<name>/SKILL.md with YAML frontmatter --\nclass SkillLoader {\n  skills: Record<string, { meta: Record<string, string>; body: string; path: string }> = {};\n\n  constructor(skillsDir: string) {\n    this.loadAll(skillsDir);\n  }\n\n  private loadAll(dir: string): void {\n    if (!existsSync(dir)) return;\n    const scanDir = (current: string): void => {\n      for (const entry of readdirSync(current, { withFileTypes: true })) {\n        if (entry.isDirectory()) scanDir(join(current, entry.name));\n        else if (entry.name === \"SKILL.md\") {\n          const text = readFileSync(join(current, entry.name), \"utf-8\");\n          const { meta, body } = this.parseFrontmatter(text);\n          const name = meta.name || basename(current);\n          this.skills[name] = { meta, body, path: join(current, entry.name) };\n        }\n      }\n    };\n    scanDir(dir);\n  }\n\n  private parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {\n    const match = text.match(/^---\\n([\\s\\S]*?)\\n---\\n([\\s\\S]*)/);\n    if (!match) return { meta: {}, body: text };\n    const meta: Record<string, string> = {};\n    for (const line of match[1].trim().split(\"\\n\")) {\n      const idx = line.indexOf(\":\");\n      if (idx !== -1) meta[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();\n    }\n    return { meta, body: match[2].trim() };\n  }\n\n  getDescriptions(): string {\n    const names = Object.keys(this.skills);\n    if (names.length === 0) return \"(no skills available)\";\n    return names.map((name) => {\n      const s = this.skills[name];\n      let line = `  - ${name}: ${s.meta.description || \"No description\"}`;\n      if (s.meta.tags) line += ` [${s.meta.tags}]`;\n      return line;\n    }).join(\"\\n\");\n  }\n\n  getContent(name: string): string {\n    const skill = this.skills[name];\n    if (!skill) return `Error: Unknown skill '${name}'. Available: ${Object.keys(this.skills).join(\", \")}`;\n    return `<skill name=\"${name}\">\\n${skill.body}\\n</skill>`;\n  }\n}\n\nconst SKILL_LOADER = new SkillLoader(SKILLS_DIR);\n\nconst SYSTEM = `You are a coding agent at ${WORKDIR}.\nUse load_skill to access specialized knowledge before tackling unfamiliar topics.\n\nSkills available:\n${SKILL_LOADER.getDescriptions()}`;\n\n// -- Tool implementations --\n\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, { cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\", stdio: [\"pipe\", \"pipe\", \"pipe\"] });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:       (input) => runBash(input.command as string),\n  read_file:  (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file: (input) => runWrite(input.path as string, input.content as string),\n  edit_file:  (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  load_skill: (input) => SKILL_LOADER.getContent(input.name as string),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"load_skill\", description: \"Load specialized knowledge by name.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\", description: \"Skill name to load\" } }, required: [\"name\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try { output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e: unknown) { output = `Error: ${e instanceof Error ? e.message : e}`; }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms05 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) { if (block.type === \"text\") console.log(block.text); }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s06",
+      "filename": "s06_context_compact.ts",
+      "title": "Compact",
+      "subtitle": "Three-Layer Compression",
+      "loc": 216,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "compact"
+      ],
+      "newTools": [
+        "compact"
+      ],
+      "coreAddition": "micro-compact + auto-compact + archival",
+      "keyInsight": "Context will fill up; three-layer compression strategy enables infinite sessions",
+      "classes": [],
+      "functions": [
+        {
+          "name": "estimateTokens",
+          "signature": "function estimateTokens(messages: Anthropic.Messages.MessageParam[]): number {",
+          "startLine": 49
+        },
+        {
+          "name": "microCompact",
+          "signature": "function microCompact(messages: Anthropic.Messages.MessageParam[]): void {",
+          "startLine": 54
+        },
+        {
+          "name": "autoCompact",
+          "signature": "async function autoCompact(messages: Anthropic.Messages.MessageParam[]): Promise<Anthropic.Messages.MessageParam[]> {",
+          "startLine": 89
+        },
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 116
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 122
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 137
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 146
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 155
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 189
+        }
+      ],
+      "layer": "memory",
+      "source": "/**\n * s06_context_compact.ts - Compact\n *\n * Three-layer compression pipeline so the agent can work forever:\n *\n *     Every turn:\n *     [Layer 1: microCompact]        (silent, every turn)\n *       Replace tool_result content older than last 3\n *       with \"[Previous: used {tool_name}]\"\n *\n *     [Check: tokens > 50000?]\n *       no -> continue\n *       yes -> [Layer 2: autoCompact]\n *                Save full transcript to .transcripts/\n *                Ask LLM to summarize conversation.\n *                Replace all messages with [summary].\n *\n *     [Layer 3: compact tool]\n *       Model calls compact -> immediate summarization.\n *\n * Key insight: \"The agent can forget strategically and keep working forever.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync, appendFileSync } from \"node:fs\";\nimport { resolve, dirname, join } from \"node:path\";\nimport { createInterface } from \"node:readline\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\n\nconst SYSTEM = `You are a coding agent at ${WORKDIR}. Use tools to solve tasks.`;\n\nconst THRESHOLD = 50_000;\nconst TRANSCRIPT_DIR = join(WORKDIR, \".transcripts\");\nconst KEEP_RECENT = 3;\n\nfunction estimateTokens(messages: Anthropic.Messages.MessageParam[]): number {\n  return JSON.stringify(messages).length / 4;\n}\n\n// -- Layer 1: microCompact - replace old tool results with placeholders --\nfunction microCompact(messages: Anthropic.Messages.MessageParam[]): void {\n  const toolResults: Array<{ msgIdx: number; partIdx: number; part: Record<string, unknown> }> = [];\n  for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {\n    const msg = messages[msgIdx];\n    if (msg.role === \"user\" && Array.isArray(msg.content)) {\n      for (let partIdx = 0; partIdx < msg.content.length; partIdx++) {\n        const part = msg.content[partIdx] as unknown as Record<string, unknown>;\n        if (part && typeof part === \"object\" && part.type === \"tool_result\") {\n          toolResults.push({ msgIdx, partIdx, part });\n        }\n      }\n    }\n  }\n  if (toolResults.length <= KEEP_RECENT) return;\n\n  // Build tool_use_id -> tool_name map from assistant messages\n  const toolNameMap: Record<string, string> = {};\n  for (const msg of messages) {\n    if (msg.role === \"assistant\" && Array.isArray(msg.content)) {\n      for (const block of msg.content) {\n        if (block.type === \"tool_use\") toolNameMap[block.id] = block.name;\n      }\n    }\n  }\n\n  const toClear = toolResults.slice(0, -KEEP_RECENT);\n  for (const { part } of toClear) {\n    if (typeof part.content === \"string\" && part.content.length > 100) {\n      const toolName = toolNameMap[part.tool_use_id as string] || \"unknown\";\n      part.content = `[Previous: used ${toolName}]`;\n    }\n  }\n}\n\n// -- Layer 2: autoCompact - save transcript, summarize, replace messages --\nasync function autoCompact(messages: Anthropic.Messages.MessageParam[]): Promise<Anthropic.Messages.MessageParam[]> {\n  mkdirSync(TRANSCRIPT_DIR, { recursive: true });\n  const transcriptPath = join(TRANSCRIPT_DIR, `transcript_${Math.floor(Date.now() / 1000)}.jsonl`);\n  for (const msg of messages) {\n    appendFileSync(transcriptPath, JSON.stringify(msg, (_key, value) => typeof value === \"bigint\" ? String(value) : value) + \"\\n\");\n  }\n  console.log(`[transcript saved: ${transcriptPath}]`);\n\n  const conversationText = JSON.stringify(messages).slice(0, 80_000);\n  const response = await client.messages.create({\n    model: MODEL,\n    messages: [{ role: \"user\", content:\n      \"Summarize this conversation for continuity. Include: \" +\n      \"1) What was accomplished, 2) Current state, 3) Key decisions made. \" +\n      \"Be concise but preserve critical details.\\n\\n\" + conversationText }],\n    max_tokens: 2000,\n  });\n  const summary = response.content[0].type === \"text\" ? response.content[0].text : \"\";\n\n  return [\n    { role: \"user\", content: `[Conversation compressed. Transcript: ${transcriptPath}]\\n\\n${summary}` },\n    { role: \"assistant\", content: \"Understood. I have the context from the summary. Continuing.\" },\n  ];\n}\n\n// -- Tool implementations --\n\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, { cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\", stdio: [\"pipe\", \"pipe\", \"pipe\"] });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:       (input) => runBash(input.command as string),\n  read_file:  (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file: (input) => runWrite(input.path as string, input.content as string),\n  edit_file:  (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  compact:    () => \"Manual compression requested.\",\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"compact\", description: \"Trigger manual conversation compression.\",\n    input_schema: { type: \"object\" as const, properties: { focus: { type: \"string\", description: \"What to preserve in the summary\" } } } },\n];\n\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    // Layer 1: microCompact before each LLM call\n    microCompact(messages);\n    // Layer 2: autoCompact if token estimate exceeds threshold\n    if (estimateTokens(messages) > THRESHOLD) {\n      console.log(\"[auto_compact triggered]\");\n      const compacted = await autoCompact(messages);\n      messages.splice(0, messages.length, ...compacted);\n    }\n\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    let manualCompact = false;\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        let output: string;\n        if (block.name === \"compact\") {\n          manualCompact = true;\n          output = \"Compressing...\";\n        } else {\n          const handler = TOOL_HANDLERS[block.name];\n          try { output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n          catch (e: unknown) { output = `Error: ${e instanceof Error ? e.message : e}`; }\n        }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n\n    // Layer 3: manual compact triggered by the compact tool\n    if (manualCompact) {\n      console.log(\"[manual compact]\");\n      const compacted = await autoCompact(messages);\n      messages.splice(0, messages.length, ...compacted);\n    }\n  }\n}\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms06 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) { if (block.type === \"text\") console.log(block.text); }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s07",
+      "filename": "s07_task_system.ts",
+      "title": "Tasks",
+      "subtitle": "Task Graph + Dependencies",
+      "loc": 225,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get"
+      ],
+      "newTools": [
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get"
+      ],
+      "coreAddition": "TaskManager with file-based state + dependency graph",
+      "keyInsight": "A file-based task graph with ordering, parallelism, and dependencies -- the coordination backbone for multi-agent work",
+      "classes": [
+        {
+          "name": "TaskManager",
+          "startLine": 51,
+          "endLine": 129
+        }
+      ],
+      "functions": [
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 134
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 140
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 155
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 164
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 173
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 216
+        }
+      ],
+      "layer": "planning",
+      "source": "/**\n * s07_task_system.ts - Tasks\n *\n * Tasks persist as JSON files in .tasks/ so they survive context compression.\n * Each task has a dependency graph (blockedBy/blocks).\n *\n *     .tasks/\n *       task_1.json  {\"id\":1, \"subject\":\"...\", \"status\":\"completed\", ...}\n *       task_2.json  {\"id\":2, \"blockedBy\":[1], \"status\":\"pending\", ...}\n *       task_3.json  {\"id\":3, \"blockedBy\":[2], \"blocks\":[], ...}\n *\n *     Dependency resolution:\n *     +----------+     +----------+     +----------+\n *     | task 1   | --> | task 2   | --> | task 3   |\n *     | complete |     | blocked  |     | blocked  |\n *     +----------+     +----------+     +----------+\n *          |                ^\n *          +--- completing task 1 removes it from task 2's blockedBy\n *\n * Key insight: \"State that survives compression -- because it's outside the conversation.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync, readdirSync } from \"node:fs\";\nimport { resolve, dirname, join } from \"node:path\";\nimport { createInterface } from \"node:readline\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\nconst TASKS_DIR = join(WORKDIR, \".tasks\");\n\nconst SYSTEM = `You are a coding agent at ${WORKDIR}. Use task tools to plan and track work.`;\n\n// -- TaskManager: CRUD with dependency graph, persisted as JSON files --\ninterface Task {\n  id: number; subject: string; description: string;\n  status: string; blockedBy: number[]; blocks: number[]; owner: string;\n}\n\nclass TaskManager {\n  private dir: string;\n  private nextId: number;\n\n  constructor(tasksDir: string) {\n    this.dir = tasksDir;\n    mkdirSync(this.dir, { recursive: true });\n    this.nextId = this.maxId() + 1;\n  }\n\n  private maxId(): number {\n    const files = readdirSync(this.dir).filter((f) => f.match(/^task_\\d+\\.json$/));\n    const ids = files.map((f) => parseInt(f.replace(\"task_\", \"\").replace(\".json\", \"\"), 10));\n    return ids.length > 0 ? Math.max(...ids) : 0;\n  }\n\n  private load(taskId: number): Task {\n    try { return JSON.parse(readFileSync(join(this.dir, `task_${taskId}.json`), \"utf-8\")); }\n    catch { throw new Error(`Task ${taskId} not found`); }\n  }\n\n  private save(task: Task): void {\n    writeFileSync(join(this.dir, `task_${task.id}.json`), JSON.stringify(task, null, 2));\n  }\n\n  create(subject: string, description = \"\"): string {\n    const task: Task = { id: this.nextId, subject, description, status: \"pending\", blockedBy: [], blocks: [], owner: \"\" };\n    this.save(task);\n    this.nextId++;\n    return JSON.stringify(task, null, 2);\n  }\n\n  get(taskId: number): string {\n    return JSON.stringify(this.load(taskId), null, 2);\n  }\n\n  update(taskId: number, status?: string, addBlockedBy?: number[], addBlocks?: number[]): string {\n    const task = this.load(taskId);\n    if (status) {\n      if (![\"pending\", \"in_progress\", \"completed\"].includes(status)) throw new Error(`Invalid status: ${status}`);\n      task.status = status;\n      if (status === \"completed\") this.clearDependency(taskId);\n    }\n    if (addBlockedBy) task.blockedBy = [...new Set([...task.blockedBy, ...addBlockedBy])];\n    if (addBlocks) {\n      task.blocks = [...new Set([...task.blocks, ...addBlocks])];\n      for (const blockedId of addBlocks) {\n        try {\n          const blocked = this.load(blockedId);\n          if (!blocked.blockedBy.includes(taskId)) { blocked.blockedBy.push(taskId); this.save(blocked); }\n        } catch { /* skip */ }\n      }\n    }\n    this.save(task);\n    return JSON.stringify(task, null, 2);\n  }\n\n  private clearDependency(completedId: number): void {\n    const files = readdirSync(this.dir).filter((f) => f.match(/^task_\\d+\\.json$/));\n    for (const f of files) {\n      const task: Task = JSON.parse(readFileSync(join(this.dir, f), \"utf-8\"));\n      if (task.blockedBy.includes(completedId)) {\n        task.blockedBy = task.blockedBy.filter((id) => id !== completedId);\n        this.save(task);\n      }\n    }\n  }\n\n  listAll(): string {\n    const files = readdirSync(this.dir).filter((f) => f.match(/^task_\\d+\\.json$/)).sort();\n    if (files.length === 0) return \"No tasks.\";\n    const markers: Record<string, string> = { pending: \"[ ]\", in_progress: \"[>]\", completed: \"[x]\" };\n    return files.map((f) => {\n      const t: Task = JSON.parse(readFileSync(join(this.dir, f), \"utf-8\"));\n      const blocked = t.blockedBy.length > 0 ? ` (blocked by: ${JSON.stringify(t.blockedBy)})` : \"\";\n      return `${markers[t.status] || \"[?]\"} #${t.id}: ${t.subject}${blocked}`;\n    }).join(\"\\n\");\n  }\n}\n\nconst TASKS = new TaskManager(TASKS_DIR);\n\n// -- Tool implementations --\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, { cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\", stdio: [\"pipe\", \"pipe\", \"pipe\"] });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:        (input) => runBash(input.command as string),\n  read_file:   (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file:  (input) => runWrite(input.path as string, input.content as string),\n  edit_file:   (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  task_create: (input) => TASKS.create(input.subject as string, (input.description as string) ?? \"\"),\n  task_update: (input) => TASKS.update(input.task_id as number, input.status as string | undefined, input.addBlockedBy as number[] | undefined, input.addBlocks as number[] | undefined),\n  task_list:   () => TASKS.listAll(),\n  task_get:    (input) => TASKS.get(input.task_id as number),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"task_create\", description: \"Create a new task.\",\n    input_schema: { type: \"object\" as const, properties: { subject: { type: \"string\" }, description: { type: \"string\" } }, required: [\"subject\"] } },\n  { name: \"task_update\", description: \"Update a task's status or dependencies.\",\n    input_schema: { type: \"object\" as const, properties: { task_id: { type: \"integer\" }, status: { type: \"string\", enum: [\"pending\", \"in_progress\", \"completed\"] }, addBlockedBy: { type: \"array\", items: { type: \"integer\" } }, addBlocks: { type: \"array\", items: { type: \"integer\" } } }, required: [\"task_id\"] } },\n  { name: \"task_list\", description: \"List all tasks with status summary.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"task_get\", description: \"Get full details of a task by ID.\",\n    input_schema: { type: \"object\" as const, properties: { task_id: { type: \"integer\" } }, required: [\"task_id\"] } },\n];\n\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try { output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e: unknown) { output = `Error: ${e instanceof Error ? e.message : e}`; }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms07 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) { if (block.type === \"text\") console.log(block.text); }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s08",
+      "filename": "s08_background_tasks.ts",
+      "title": "Background Tasks",
+      "subtitle": "Background Threads + Notifications",
+      "loc": 188,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "background_run",
+        "check_background"
+      ],
+      "newTools": [
+        "background_run",
+        "check_background"
+      ],
+      "coreAddition": "BackgroundManager + notification queue",
+      "keyInsight": "Run slow operations in the background; the agent keeps thinking ahead",
+      "classes": [
+        {
+          "name": "BackgroundManager",
+          "startLine": 52,
+          "endLine": 86
+        }
+      ],
+      "functions": [
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 91
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 97
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 112
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 121
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 130
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 167
+        }
+      ],
+      "layer": "concurrency",
+      "source": "/**\n * s08_background_tasks.ts - Background Tasks\n *\n * Run commands in background. A notification queue is drained\n * before each LLM call to deliver results.\n *\n *     Main thread                Background (async)\n *     +-----------------+        +-----------------+\n *     | agent loop      |        | task executes   |\n *     | ...             |        | ...             |\n *     | [LLM call] <---+------- | push(result)    |\n *     |  ^drain queue   |        +-----------------+\n *     +-----------------+\n *\n *     Timeline:\n *     Agent ----[spawn A]----[spawn B]----[other work]----\n *                  |              |\n *                  v              v\n *               [A runs]      [B runs]        (parallel)\n *                  |              |\n *                  +-- notification queue --> [results injected]\n *\n * Key insight: \"Fire and forget -- the agent doesn't block while the command runs.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync, exec } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync } from \"node:fs\";\nimport { resolve, dirname } from \"node:path\";\nimport { createInterface } from \"node:readline\";\nimport { randomUUID } from \"node:crypto\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\n\nconst SYSTEM = `You are a coding agent at ${WORKDIR}. Use background_run for long-running commands.`;\n\n// -- BackgroundManager: async execution + notification queue --\ninterface BgTask { status: string; result: string | null; command: string }\ninterface BgNotification { task_id: string; status: string; command: string; result: string }\n\nclass BackgroundManager {\n  tasks: Record<string, BgTask> = {};\n  private notifications: BgNotification[] = [];\n\n  run(command: string): string {\n    const taskId = randomUUID().slice(0, 8);\n    this.tasks[taskId] = { status: \"running\", result: null, command };\n    exec(command, { cwd: WORKDIR, timeout: 300_000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {\n      let output: string; let status: string;\n      if (err && err.killed) { output = \"Error: Timeout (300s)\"; status = \"timeout\"; }\n      else if (err) { output = ((stdout ?? \"\") + (stderr ?? \"\")).trim().slice(0, 50_000) || `Error: ${err.message}`; status = \"error\"; }\n      else { output = ((stdout ?? \"\") + (stderr ?? \"\")).trim().slice(0, 50_000) || \"(no output)\"; status = \"completed\"; }\n      this.tasks[taskId] = { status, result: output, command };\n      this.notifications.push({ task_id: taskId, status, command: command.slice(0, 80), result: output.slice(0, 500) });\n    });\n    return `Background task ${taskId} started: ${command.slice(0, 80)}`;\n  }\n\n  check(taskId?: string): string {\n    if (taskId) {\n      const t = this.tasks[taskId];\n      if (!t) return `Error: Unknown task ${taskId}`;\n      return `[${t.status}] ${t.command.slice(0, 60)}\\n${t.result ?? \"(running)\"}`;\n    }\n    const entries = Object.entries(this.tasks);\n    if (entries.length === 0) return \"No background tasks.\";\n    return entries.map(([tid, t]) => `${tid}: [${t.status}] ${t.command.slice(0, 60)}`).join(\"\\n\");\n  }\n\n  drainNotifications(): BgNotification[] {\n    const items = [...this.notifications];\n    this.notifications.length = 0;\n    return items;\n  }\n}\n\nconst BG = new BackgroundManager();\n\n// -- Tool implementations --\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, { cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\", stdio: [\"pipe\", \"pipe\", \"pipe\"] });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:             (input) => runBash(input.command as string),\n  read_file:        (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file:       (input) => runWrite(input.path as string, input.content as string),\n  edit_file:        (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  background_run:   (input) => BG.run(input.command as string),\n  check_background: (input) => BG.check(input.task_id as string | undefined),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command (blocking).\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"background_run\", description: \"Run command in background. Returns task_id immediately.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"check_background\", description: \"Check background task status. Omit task_id to list all.\",\n    input_schema: { type: \"object\" as const, properties: { task_id: { type: \"string\" } } } },\n];\n\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    // Drain background notifications and inject before LLM call\n    const notifs = BG.drainNotifications();\n    if (notifs.length > 0 && messages.length > 0) {\n      const notifText = notifs.map((n) => `[bg:${n.task_id}] ${n.status}: ${n.result}`).join(\"\\n\");\n      messages.push({ role: \"user\", content: `<background-results>\\n${notifText}\\n</background-results>` });\n      messages.push({ role: \"assistant\", content: \"Noted background results.\" });\n    }\n\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try { output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`; }\n        catch (e: unknown) { output = `Error: ${e instanceof Error ? e.message : e}`; }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms08 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) { if (block.type === \"text\") console.log(block.text); }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s09",
+      "filename": "s09_agent_teams.ts",
+      "title": "Agent Teams",
+      "subtitle": "Teammates + Mailboxes",
+      "loc": 370,
+      "tools": [
+        "default",
+        "alice",
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "send_message",
+        "read_inbox",
+        "spawn_teammate",
+        "list_teammates",
+        "broadcast"
+      ],
+      "newTools": [
+        "default",
+        "alice",
+        "send_message",
+        "read_inbox",
+        "spawn_teammate",
+        "list_teammates",
+        "broadcast"
+      ],
+      "coreAddition": "TeammateManager + file-based mailbox",
+      "keyInsight": "When one agent can't finish, delegate to persistent teammates via async mailboxes",
+      "classes": [
+        {
+          "name": "MessageBus",
+          "startLine": 77,
+          "endLine": 124
+        },
+        {
+          "name": "TeammateManager",
+          "startLine": 133,
+          "endLine": 258
+        }
+      ],
+      "functions": [
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 264
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 270
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 285
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 294
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 303
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 352
+        }
+      ],
+      "layer": "collaboration",
+      "source": "/**\n * s09_agent_teams.ts - Agent Teams\n *\n * Persistent named agents with file-based JSONL inboxes. Each teammate runs\n * its own agent loop in a separate thread. Communication via append-only inboxes.\n *\n *     Subagent (s04):  spawn -> execute -> return summary -> destroyed\n *     Teammate (s09):  spawn -> work -> idle -> work -> ... -> shutdown\n *\n *     .team/config.json                   .team/inbox/\n *     +----------------------------+      +------------------+\n *     | {\"team_name\": \"default\",   |      | alice.jsonl      |\n *     |  \"members\": [              |      | bob.jsonl        |\n *     |    {\"name\":\"alice\",        |      | lead.jsonl       |\n *     |     \"role\":\"coder\",        |      +------------------+\n *     |     \"status\":\"idle\"}       |\n *     |  ]}                        |      send_message(\"alice\", \"fix bug\"):\n *     +----------------------------+        open(\"alice.jsonl\", \"a\").write(msg)\n *\n *                                         read_inbox(\"alice\"):\n *     spawn_teammate(\"alice\",\"coder\",...)   msgs = [json.loads(l) for l in ...]\n *          |                                open(\"alice.jsonl\", \"w\").close()\n *          v                                return msgs  // drain\n *     Async: alice              Async: bob\n *     +------------------+      +------------------+\n *     | agent_loop       |      | agent_loop       |\n *     | status: working  |      | status: idle     |\n *     | ... runs tools   |      | ... waits ...    |\n *     | status -> idle   |      |                  |\n *     +------------------+      +------------------+\n *\n *     5 message types (all declared, not all handled here):\n *     +-------------------------+-----------------------------------+\n *     | message                 | Normal text message               |\n *     | broadcast               | Sent to all teammates             |\n *     | shutdown_request        | Request graceful shutdown (s10)   |\n *     | shutdown_response       | Approve/reject shutdown (s10)     |\n *     | plan_approval_response  | Approve/reject plan (s10)         |\n *     +-------------------------+-----------------------------------+\n *\n * Key insight: \"Teammates that can talk to each other.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync } from \"node:fs\";\nimport { resolve, dirname, join } from \"node:path\";\nimport { createInterface } from \"node:readline\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\nconst TEAM_DIR = join(WORKDIR, \".team\");\nconst INBOX_DIR = join(TEAM_DIR, \"inbox\");\n\nconst SYSTEM = `You are a team lead at ${WORKDIR}. Spawn teammates and communicate via inboxes.`;\n\nconst VALID_MSG_TYPES = [\n  \"message\",\n  \"broadcast\",\n  \"shutdown_request\",\n  \"shutdown_response\",\n  \"plan_approval_response\",\n];\n\n\n// -- MessageBus: JSONL inbox per teammate --\nclass MessageBus {\n  dir: string;\n\n  constructor(inboxDir: string) {\n    this.dir = inboxDir;\n    mkdirSync(this.dir, { recursive: true });\n  }\n\n  send(sender: string, to: string, content: string,\n       msgType: string = \"message\", extra?: Record<string, unknown>): string {\n    if (!VALID_MSG_TYPES.includes(msgType)) {\n      return `Error: Invalid type '${msgType}'. Valid: ${VALID_MSG_TYPES.join(\", \")}`;\n    }\n    const msg: Record<string, unknown> = {\n      type: msgType,\n      from: sender,\n      content,\n      timestamp: Date.now() / 1000,\n    };\n    if (extra) Object.assign(msg, extra);\n    const inboxPath = join(this.dir, `${to}.jsonl`);\n    appendFileSync(inboxPath, JSON.stringify(msg) + \"\\n\");\n    return `Sent ${msgType} to ${to}`;\n  }\n\n  readInbox(name: string): Record<string, unknown>[] {\n    const inboxPath = join(this.dir, `${name}.jsonl`);\n    if (!existsSync(inboxPath)) return [];\n    const text = readFileSync(inboxPath, \"utf-8\").trim();\n    const messages: Record<string, unknown>[] = [];\n    for (const line of text.split(\"\\n\")) {\n      if (line) messages.push(JSON.parse(line));\n    }\n    writeFileSync(inboxPath, \"\");\n    return messages;\n  }\n\n  broadcast(sender: string, content: string, teammates: string[]): string {\n    let count = 0;\n    for (const name of teammates) {\n      if (name !== sender) {\n        this.send(sender, name, content, \"broadcast\");\n        count++;\n      }\n    }\n    return `Broadcast to ${count} teammates`;\n  }\n}\n\nconst BUS = new MessageBus(INBOX_DIR);\n\n\n// -- TeammateManager: persistent named agents with config.json --\ninterface MemberConfig { name: string; role: string; status: string }\ninterface TeamConfig { team_name: string; members: MemberConfig[] }\n\nclass TeammateManager {\n  dir: string;\n  configPath: string;\n  config: TeamConfig;\n\n  constructor(teamDir: string) {\n    this.dir = teamDir;\n    mkdirSync(this.dir, { recursive: true });\n    this.configPath = join(this.dir, \"config.json\");\n    this.config = this._loadConfig();\n  }\n\n  _loadConfig(): TeamConfig {\n    if (existsSync(this.configPath)) {\n      return JSON.parse(readFileSync(this.configPath, \"utf-8\"));\n    }\n    return { team_name: \"default\", members: [] };\n  }\n\n  _saveConfig(): void {\n    writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));\n  }\n\n  _findMember(name: string): MemberConfig | undefined {\n    return this.config.members.find((m) => m.name === name);\n  }\n\n  spawn(name: string, role: string, prompt: string): string {\n    let member = this._findMember(name);\n    if (member) {\n      if (member.status !== \"idle\" && member.status !== \"shutdown\") {\n        return `Error: '${name}' is currently ${member.status}`;\n      }\n      member.status = \"working\";\n      member.role = role;\n    } else {\n      member = { name, role, status: \"working\" };\n      this.config.members.push(member);\n    }\n    this._saveConfig();\n    // Fire-and-forget async teammate loop\n    this._teammateLoop(name, role, prompt);\n    return `Spawned '${name}' (role: ${role})`;\n  }\n\n  async _teammateLoop(name: string, role: string, prompt: string): Promise<void> {\n    const sysPrompt =\n      `You are '${name}', role: ${role}, at ${WORKDIR}. ` +\n      `Use send_message to communicate. Complete your task.`;\n    const messages: Anthropic.Messages.MessageParam[] = [{ role: \"user\", content: prompt }];\n    const tools = this._teammateTools();\n\n    for (let i = 0; i < 50; i++) {\n      const inbox = BUS.readInbox(name);\n      for (const msg of inbox) {\n        messages.push({ role: \"user\", content: JSON.stringify(msg) });\n      }\n      let response: Anthropic.Messages.Message;\n      try {\n        response = await client.messages.create({\n          model: MODEL, system: sysPrompt, messages, tools, max_tokens: 8000,\n        });\n      } catch {\n        break;\n      }\n      messages.push({ role: \"assistant\", content: response.content });\n      if (response.stop_reason !== \"tool_use\") break;\n\n      const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n      for (const block of response.content) {\n        if (block.type === \"tool_use\") {\n          const output = this._exec(name, block.name, block.input as Record<string, unknown>);\n          console.log(`  [${name}] ${block.name}: ${String(output).slice(0, 120)}`);\n          results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n        }\n      }\n      messages.push({ role: \"user\", content: results });\n    }\n\n    const member = this._findMember(name);\n    if (member && member.status !== \"shutdown\") {\n      member.status = \"idle\";\n      this._saveConfig();\n    }\n  }\n\n  _exec(sender: string, toolName: string, args: Record<string, unknown>): string {\n    if (toolName === \"bash\") return runBash(args.command as string);\n    if (toolName === \"read_file\") return runRead(args.path as string);\n    if (toolName === \"write_file\") return runWrite(args.path as string, args.content as string);\n    if (toolName === \"edit_file\") return runEdit(args.path as string, args.old_text as string, args.new_text as string);\n    if (toolName === \"send_message\") return BUS.send(sender, args.to as string, args.content as string, (args.msg_type as string) || \"message\");\n    if (toolName === \"read_inbox\") return JSON.stringify(BUS.readInbox(sender), null, 2);\n    return `Unknown tool: ${toolName}`;\n  }\n\n  _teammateTools(): Anthropic.Messages.Tool[] {\n    return [\n      { name: \"bash\", description: \"Run a shell command.\",\n        input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n      { name: \"read_file\", description: \"Read file contents.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" } }, required: [\"path\"] } },\n      { name: \"write_file\", description: \"Write content to file.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n      { name: \"edit_file\", description: \"Replace exact text in file.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n      { name: \"send_message\", description: \"Send message to a teammate.\",\n        input_schema: { type: \"object\" as const, properties: { to: { type: \"string\" }, content: { type: \"string\" }, msg_type: { type: \"string\", enum: VALID_MSG_TYPES } }, required: [\"to\", \"content\"] } },\n      { name: \"read_inbox\", description: \"Read and drain your inbox.\",\n        input_schema: { type: \"object\" as const, properties: {} } },\n    ];\n  }\n\n  listAll(): string {\n    if (this.config.members.length === 0) return \"No teammates.\";\n    const lines = [`Team: ${this.config.team_name}`];\n    for (const m of this.config.members) {\n      lines.push(`  ${m.name} (${m.role}): ${m.status}`);\n    }\n    return lines.join(\"\\n\");\n  }\n\n  memberNames(): string[] {\n    return this.config.members.map((m) => m.name);\n  }\n}\n\nconst TEAM = new TeammateManager(TEAM_DIR);\n\n\n// -- Base tool implementations --\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, { cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\", stdio: [\"pipe\", \"pipe\", \"pipe\"] });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\n\n// -- Lead tool dispatch (9 tools) --\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:            (input) => runBash(input.command as string),\n  read_file:       (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file:      (input) => runWrite(input.path as string, input.content as string),\n  edit_file:       (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  spawn_teammate:  (input) => TEAM.spawn(input.name as string, input.role as string, input.prompt as string),\n  list_teammates:  () => TEAM.listAll(),\n  send_message:    (input) => BUS.send(\"lead\", input.to as string, input.content as string, (input.msg_type as string) || \"message\"),\n  read_inbox:      () => JSON.stringify(BUS.readInbox(\"lead\"), null, 2),\n  broadcast:       (input) => BUS.broadcast(\"lead\", input.content as string, TEAM.memberNames()),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"spawn_teammate\", description: \"Spawn a persistent teammate that runs in its own thread.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\" }, role: { type: \"string\" }, prompt: { type: \"string\" } }, required: [\"name\", \"role\", \"prompt\"] } },\n  { name: \"list_teammates\", description: \"List all teammates with name, role, status.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"send_message\", description: \"Send a message to a teammate's inbox.\",\n    input_schema: { type: \"object\" as const, properties: { to: { type: \"string\" }, content: { type: \"string\" }, msg_type: { type: \"string\", enum: VALID_MSG_TYPES } }, required: [\"to\", \"content\"] } },\n  { name: \"read_inbox\", description: \"Read and drain the lead's inbox.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"broadcast\", description: \"Send a message to all teammates.\",\n    input_schema: { type: \"object\" as const, properties: { content: { type: \"string\" } }, required: [\"content\"] } },\n];\n\n\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const inbox = BUS.readInbox(\"lead\");\n    if (inbox.length > 0) {\n      messages.push({\n        role: \"user\",\n        content: `<inbox>${JSON.stringify(inbox, null, 2)}</inbox>`,\n      });\n      messages.push({\n        role: \"assistant\",\n        content: \"Noted inbox messages.\",\n      });\n    }\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try {\n          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        } catch (e: unknown) {\n          output = `Error: ${e instanceof Error ? e.message : e}`;\n        }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms09 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    if (query.trim() === \"/team\") {\n      console.log(TEAM.listAll());\n      prompt();\n      return;\n    }\n    if (query.trim() === \"/inbox\") {\n      console.log(JSON.stringify(BUS.readInbox(\"lead\"), null, 2));\n      prompt();\n      return;\n    }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if ((block as Anthropic.Messages.TextBlock).type === \"text\") {\n          console.log((block as Anthropic.Messages.TextBlock).text);\n        }\n      }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s10",
+      "filename": "s10_team_protocols.ts",
+      "title": "Team Protocols",
+      "subtitle": "Shared Communication Rules",
+      "loc": 440,
+      "tools": [
+        "default",
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "send_message",
+        "read_inbox",
+        "shutdown_response",
+        "plan_approval",
+        "spawn_teammate",
+        "list_teammates",
+        "broadcast",
+        "shutdown_request"
+      ],
+      "newTools": [
+        "shutdown_response",
+        "plan_approval",
+        "shutdown_request"
+      ],
+      "coreAddition": "request_id correlation for two protocols",
+      "keyInsight": "One request-response pattern drives all team negotiation",
+      "classes": [
+        {
+          "name": "MessageBus",
+          "startLine": 86,
+          "endLine": 133
+        },
+        {
+          "name": "TeammateManager",
+          "startLine": 142,
+          "endLine": 300
+        }
+      ],
+      "functions": [
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 306
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 312
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 327
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 336
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 345
+        },
+        {
+          "name": "handleShutdownRequest",
+          "signature": "function handleShutdownRequest(teammate: string): string {",
+          "startLine": 357
+        },
+        {
+          "name": "handlePlanReview",
+          "signature": "function handlePlanReview(requestId: string, approve: boolean, feedback: string = \"\"): string {",
+          "startLine": 367
+        },
+        {
+          "name": "checkShutdownStatus",
+          "signature": "function checkShutdownStatus(requestId: string): string {",
+          "startLine": 378
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 430
+        }
+      ],
+      "layer": "collaboration",
+      "source": "/**\n * s10_team_protocols.ts - Team Protocols\n *\n * Shutdown protocol and plan approval protocol, both using the same\n * request_id correlation pattern. Builds on s09's team messaging.\n *\n *     Shutdown FSM: pending -> approved | rejected\n *\n *     Lead                              Teammate\n *     +---------------------+          +---------------------+\n *     | shutdown_request     |          |                     |\n *     | {                    | -------> | receives request    |\n *     |   request_id: abc    |          | decides: approve?   |\n *     | }                    |          |                     |\n *     +---------------------+          +---------------------+\n *                                              |\n *     +---------------------+          +-------v-------------+\n *     | shutdown_response    | <------- | shutdown_response   |\n *     | {                    |          | {                   |\n *     |   request_id: abc    |          |   request_id: abc   |\n *     |   approve: true      |          |   approve: true     |\n *     | }                    |          | }                   |\n *     +---------------------+          +---------------------+\n *             |\n *             v\n *     status -> \"shutdown\", thread stops\n *\n *     Plan approval FSM: pending -> approved | rejected\n *\n *     Teammate                          Lead\n *     +---------------------+          +---------------------+\n *     | plan_approval        |          |                     |\n *     | submit: {plan:\"...\"}| -------> | reviews plan text   |\n *     +---------------------+          | approve/reject?     |\n *                                      +---------------------+\n *                                              |\n *     +---------------------+          +-------v-------------+\n *     | plan_approval_resp   | <------- | plan_approval       |\n *     | {approve: true}      |          | review: {req_id,    |\n *     +---------------------+          |   approve: true}     |\n *                                      +---------------------+\n *\n *     Trackers: {request_id: {\"target|from\": name, \"status\": \"pending|...\"}}\n *\n * Key insight: \"Same request_id correlation pattern, two domains.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync } from \"node:fs\";\nimport { resolve, dirname, join } from \"node:path\";\nimport { createInterface } from \"node:readline\";\nimport { randomUUID } from \"node:crypto\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\nconst TEAM_DIR = join(WORKDIR, \".team\");\nconst INBOX_DIR = join(TEAM_DIR, \"inbox\");\n\nconst SYSTEM = `You are a team lead at ${WORKDIR}. Manage teammates with shutdown and plan approval protocols.`;\n\nconst VALID_MSG_TYPES = [\n  \"message\",\n  \"broadcast\",\n  \"shutdown_request\",\n  \"shutdown_response\",\n  \"plan_approval_response\",\n];\n\n// -- Request trackers: correlate by request_id --\nconst shutdownRequests: Record<string, { target?: string; from?: string; status: string }> = {};\nconst planRequests: Record<string, { from: string; plan: string; status: string }> = {};\n\n\n// -- MessageBus: JSONL inbox per teammate --\nclass MessageBus {\n  dir: string;\n\n  constructor(inboxDir: string) {\n    this.dir = inboxDir;\n    mkdirSync(this.dir, { recursive: true });\n  }\n\n  send(sender: string, to: string, content: string,\n       msgType: string = \"message\", extra?: Record<string, unknown>): string {\n    if (!VALID_MSG_TYPES.includes(msgType)) {\n      return `Error: Invalid type '${msgType}'. Valid: ${VALID_MSG_TYPES.join(\", \")}`;\n    }\n    const msg: Record<string, unknown> = {\n      type: msgType,\n      from: sender,\n      content,\n      timestamp: Date.now() / 1000,\n    };\n    if (extra) Object.assign(msg, extra);\n    const inboxPath = join(this.dir, `${to}.jsonl`);\n    appendFileSync(inboxPath, JSON.stringify(msg) + \"\\n\");\n    return `Sent ${msgType} to ${to}`;\n  }\n\n  readInbox(name: string): Record<string, unknown>[] {\n    const inboxPath = join(this.dir, `${name}.jsonl`);\n    if (!existsSync(inboxPath)) return [];\n    const text = readFileSync(inboxPath, \"utf-8\").trim();\n    const messages: Record<string, unknown>[] = [];\n    for (const line of text.split(\"\\n\")) {\n      if (line) messages.push(JSON.parse(line));\n    }\n    writeFileSync(inboxPath, \"\");\n    return messages;\n  }\n\n  broadcast(sender: string, content: string, teammates: string[]): string {\n    let count = 0;\n    for (const name of teammates) {\n      if (name !== sender) {\n        this.send(sender, name, content, \"broadcast\");\n        count++;\n      }\n    }\n    return `Broadcast to ${count} teammates`;\n  }\n}\n\nconst BUS = new MessageBus(INBOX_DIR);\n\n\n// -- TeammateManager with shutdown + plan approval --\ninterface MemberConfig { name: string; role: string; status: string }\ninterface TeamConfig { team_name: string; members: MemberConfig[] }\n\nclass TeammateManager {\n  dir: string;\n  configPath: string;\n  config: TeamConfig;\n\n  constructor(teamDir: string) {\n    this.dir = teamDir;\n    mkdirSync(this.dir, { recursive: true });\n    this.configPath = join(this.dir, \"config.json\");\n    this.config = this._loadConfig();\n  }\n\n  _loadConfig(): TeamConfig {\n    if (existsSync(this.configPath)) {\n      return JSON.parse(readFileSync(this.configPath, \"utf-8\"));\n    }\n    return { team_name: \"default\", members: [] };\n  }\n\n  _saveConfig(): void {\n    writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));\n  }\n\n  _findMember(name: string): MemberConfig | undefined {\n    return this.config.members.find((m) => m.name === name);\n  }\n\n  spawn(name: string, role: string, prompt: string): string {\n    let member = this._findMember(name);\n    if (member) {\n      if (member.status !== \"idle\" && member.status !== \"shutdown\") {\n        return `Error: '${name}' is currently ${member.status}`;\n      }\n      member.status = \"working\";\n      member.role = role;\n    } else {\n      member = { name, role, status: \"working\" };\n      this.config.members.push(member);\n    }\n    this._saveConfig();\n    // Fire-and-forget async teammate loop\n    this._teammateLoop(name, role, prompt);\n    return `Spawned '${name}' (role: ${role})`;\n  }\n\n  async _teammateLoop(name: string, role: string, prompt: string): Promise<void> {\n    const sysPrompt =\n      `You are '${name}', role: ${role}, at ${WORKDIR}. ` +\n      `Submit plans via plan_approval before major work. ` +\n      `Respond to shutdown_request with shutdown_response.`;\n    const messages: Anthropic.Messages.MessageParam[] = [{ role: \"user\", content: prompt }];\n    const tools = this._teammateTools();\n    let shouldExit = false;\n\n    for (let i = 0; i < 50; i++) {\n      const inbox = BUS.readInbox(name);\n      for (const msg of inbox) {\n        messages.push({ role: \"user\", content: JSON.stringify(msg) });\n      }\n      if (shouldExit) break;\n\n      let response: Anthropic.Messages.Message;\n      try {\n        response = await client.messages.create({\n          model: MODEL, system: sysPrompt, messages, tools, max_tokens: 8000,\n        });\n      } catch {\n        break;\n      }\n      messages.push({ role: \"assistant\", content: response.content });\n      if (response.stop_reason !== \"tool_use\") break;\n\n      const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n      for (const block of response.content) {\n        if (block.type === \"tool_use\") {\n          const output = this._exec(name, block.name, block.input as Record<string, unknown>);\n          console.log(`  [${name}] ${block.name}: ${String(output).slice(0, 120)}`);\n          results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n          if (block.name === \"shutdown_response\" && (block.input as Record<string, unknown>).approve) {\n            shouldExit = true;\n          }\n        }\n      }\n      messages.push({ role: \"user\", content: results });\n    }\n\n    const member = this._findMember(name);\n    if (member) {\n      member.status = shouldExit ? \"shutdown\" : \"idle\";\n      this._saveConfig();\n    }\n  }\n\n  _exec(sender: string, toolName: string, args: Record<string, unknown>): string {\n    if (toolName === \"bash\") return runBash(args.command as string);\n    if (toolName === \"read_file\") return runRead(args.path as string);\n    if (toolName === \"write_file\") return runWrite(args.path as string, args.content as string);\n    if (toolName === \"edit_file\") return runEdit(args.path as string, args.old_text as string, args.new_text as string);\n    if (toolName === \"send_message\") return BUS.send(sender, args.to as string, args.content as string, (args.msg_type as string) || \"message\");\n    if (toolName === \"read_inbox\") return JSON.stringify(BUS.readInbox(sender), null, 2);\n    if (toolName === \"shutdown_response\") {\n      const reqId = args.request_id as string;\n      const approve = args.approve as boolean;\n      if (reqId in shutdownRequests) {\n        shutdownRequests[reqId].status = approve ? \"approved\" : \"rejected\";\n      }\n      BUS.send(\n        sender, \"lead\", (args.reason as string) || \"\",\n        \"shutdown_response\", { request_id: reqId, approve },\n      );\n      return `Shutdown ${approve ? \"approved\" : \"rejected\"}`;\n    }\n    if (toolName === \"plan_approval\") {\n      const planText = (args.plan as string) || \"\";\n      const reqId = randomUUID().slice(0, 8);\n      planRequests[reqId] = { from: sender, plan: planText, status: \"pending\" };\n      BUS.send(\n        sender, \"lead\", planText, \"plan_approval_response\",\n        { request_id: reqId, plan: planText },\n      );\n      return `Plan submitted (request_id=${reqId}). Waiting for lead approval.`;\n    }\n    return `Unknown tool: ${toolName}`;\n  }\n\n  _teammateTools(): Anthropic.Messages.Tool[] {\n    return [\n      { name: \"bash\", description: \"Run a shell command.\",\n        input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n      { name: \"read_file\", description: \"Read file contents.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" } }, required: [\"path\"] } },\n      { name: \"write_file\", description: \"Write content to file.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n      { name: \"edit_file\", description: \"Replace exact text in file.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n      { name: \"send_message\", description: \"Send message to a teammate.\",\n        input_schema: { type: \"object\" as const, properties: { to: { type: \"string\" }, content: { type: \"string\" }, msg_type: { type: \"string\", enum: VALID_MSG_TYPES } }, required: [\"to\", \"content\"] } },\n      { name: \"read_inbox\", description: \"Read and drain your inbox.\",\n        input_schema: { type: \"object\" as const, properties: {} } },\n      { name: \"shutdown_response\", description: \"Respond to a shutdown request. Approve to shut down, reject to keep working.\",\n        input_schema: { type: \"object\" as const, properties: { request_id: { type: \"string\" }, approve: { type: \"boolean\" }, reason: { type: \"string\" } }, required: [\"request_id\", \"approve\"] } },\n      { name: \"plan_approval\", description: \"Submit a plan for lead approval. Provide plan text.\",\n        input_schema: { type: \"object\" as const, properties: { plan: { type: \"string\" } }, required: [\"plan\"] } },\n    ];\n  }\n\n  listAll(): string {\n    if (this.config.members.length === 0) return \"No teammates.\";\n    const lines = [`Team: ${this.config.team_name}`];\n    for (const m of this.config.members) {\n      lines.push(`  ${m.name} (${m.role}): ${m.status}`);\n    }\n    return lines.join(\"\\n\");\n  }\n\n  memberNames(): string[] {\n    return this.config.members.map((m) => m.name);\n  }\n}\n\nconst TEAM = new TeammateManager(TEAM_DIR);\n\n\n// -- Base tool implementations --\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, { cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\", stdio: [\"pipe\", \"pipe\", \"pipe\"] });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\n\n// -- Lead-specific protocol handlers --\nfunction handleShutdownRequest(teammate: string): string {\n  const reqId = randomUUID().slice(0, 8);\n  shutdownRequests[reqId] = { target: teammate, status: \"pending\" };\n  BUS.send(\n    \"lead\", teammate, \"Please shut down gracefully.\",\n    \"shutdown_request\", { request_id: reqId },\n  );\n  return `Shutdown request ${reqId} sent to '${teammate}' (status: pending)`;\n}\n\nfunction handlePlanReview(requestId: string, approve: boolean, feedback: string = \"\"): string {\n  const req = planRequests[requestId];\n  if (!req) return `Error: Unknown plan request_id '${requestId}'`;\n  req.status = approve ? \"approved\" : \"rejected\";\n  BUS.send(\n    \"lead\", req.from, feedback, \"plan_approval_response\",\n    { request_id: requestId, approve, feedback },\n  );\n  return `Plan ${req.status} for '${req.from}'`;\n}\n\nfunction checkShutdownStatus(requestId: string): string {\n  return JSON.stringify(shutdownRequests[requestId] || { error: \"not found\" });\n}\n\n\n// -- Lead tool dispatch (12 tools) --\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:              (input) => runBash(input.command as string),\n  read_file:         (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file:        (input) => runWrite(input.path as string, input.content as string),\n  edit_file:         (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  spawn_teammate:    (input) => TEAM.spawn(input.name as string, input.role as string, input.prompt as string),\n  list_teammates:    () => TEAM.listAll(),\n  send_message:      (input) => BUS.send(\"lead\", input.to as string, input.content as string, (input.msg_type as string) || \"message\"),\n  read_inbox:        () => JSON.stringify(BUS.readInbox(\"lead\"), null, 2),\n  broadcast:         (input) => BUS.broadcast(\"lead\", input.content as string, TEAM.memberNames()),\n  shutdown_request:  (input) => handleShutdownRequest(input.teammate as string),\n  shutdown_response: (input) => checkShutdownStatus((input.request_id as string) || \"\"),\n  plan_approval:     (input) => handlePlanReview(input.request_id as string, input.approve as boolean, (input.feedback as string) || \"\"),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"spawn_teammate\", description: \"Spawn a persistent teammate.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\" }, role: { type: \"string\" }, prompt: { type: \"string\" } }, required: [\"name\", \"role\", \"prompt\"] } },\n  { name: \"list_teammates\", description: \"List all teammates.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"send_message\", description: \"Send a message to a teammate.\",\n    input_schema: { type: \"object\" as const, properties: { to: { type: \"string\" }, content: { type: \"string\" }, msg_type: { type: \"string\", enum: VALID_MSG_TYPES } }, required: [\"to\", \"content\"] } },\n  { name: \"read_inbox\", description: \"Read and drain the lead's inbox.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"broadcast\", description: \"Send a message to all teammates.\",\n    input_schema: { type: \"object\" as const, properties: { content: { type: \"string\" } }, required: [\"content\"] } },\n  { name: \"shutdown_request\", description: \"Request a teammate to shut down gracefully. Returns a request_id for tracking.\",\n    input_schema: { type: \"object\" as const, properties: { teammate: { type: \"string\" } }, required: [\"teammate\"] } },\n  { name: \"shutdown_response\", description: \"Check the status of a shutdown request by request_id.\",\n    input_schema: { type: \"object\" as const, properties: { request_id: { type: \"string\" } }, required: [\"request_id\"] } },\n  { name: \"plan_approval\", description: \"Approve or reject a teammate's plan. Provide request_id + approve + optional feedback.\",\n    input_schema: { type: \"object\" as const, properties: { request_id: { type: \"string\" }, approve: { type: \"boolean\" }, feedback: { type: \"string\" } }, required: [\"request_id\", \"approve\"] } },\n];\n\n\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const inbox = BUS.readInbox(\"lead\");\n    if (inbox.length > 0) {\n      messages.push({\n        role: \"user\",\n        content: `<inbox>${JSON.stringify(inbox, null, 2)}</inbox>`,\n      });\n      messages.push({\n        role: \"assistant\",\n        content: \"Noted inbox messages.\",\n      });\n    }\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try {\n          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        } catch (e: unknown) {\n          output = `Error: ${e instanceof Error ? e.message : e}`;\n        }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms10 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    if (query.trim() === \"/team\") {\n      console.log(TEAM.listAll());\n      prompt();\n      return;\n    }\n    if (query.trim() === \"/inbox\") {\n      console.log(JSON.stringify(BUS.readInbox(\"lead\"), null, 2));\n      prompt();\n      return;\n    }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if ((block as Anthropic.Messages.TextBlock).type === \"text\") {\n          console.log((block as Anthropic.Messages.TextBlock).text);\n        }\n      }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s11",
+      "filename": "s11_autonomous_agents.ts",
+      "title": "Autonomous Agents",
+      "subtitle": "Scan Board, Claim Tasks",
+      "loc": 540,
+      "tools": [
+        "default",
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "send_message",
+        "read_inbox",
+        "shutdown_response",
+        "plan_approval",
+        "idle",
+        "claim_task",
+        "spawn_teammate",
+        "list_teammates",
+        "broadcast",
+        "shutdown_request"
+      ],
+      "newTools": [
+        "idle",
+        "claim_task"
+      ],
+      "coreAddition": "Task board polling + timeout-based self-governance",
+      "keyInsight": "Teammates scan the board and claim tasks themselves; no need for the lead to assign each one",
+      "classes": [
+        {
+          "name": "MessageBus",
+          "startLine": 78,
+          "endLine": 125
+        },
+        {
+          "name": "TeammateManager",
+          "startLine": 177,
+          "endLine": 397
+        }
+      ],
+      "functions": [
+        {
+          "name": "scanUnclaimedTasks",
+          "signature": "function scanUnclaimedTasks(): TaskFile[] {",
+          "startLine": 140
+        },
+        {
+          "name": "claimTask",
+          "signature": "function claimTask(taskId: number, owner: string): string {",
+          "startLine": 153
+        },
+        {
+          "name": "makeIdentityBlock",
+          "signature": "function makeIdentityBlock(name: string, role: string, teamName: string): Anthropic.Messages.MessageParam {",
+          "startLine": 165
+        },
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 403
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 409
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 424
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 433
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 442
+        },
+        {
+          "name": "handleShutdownRequest",
+          "signature": "function handleShutdownRequest(teammate: string): string {",
+          "startLine": 454
+        },
+        {
+          "name": "handlePlanReview",
+          "signature": "function handlePlanReview(requestId: string, approve: boolean, feedback: string = \"\"): string {",
+          "startLine": 464
+        },
+        {
+          "name": "checkShutdownStatus",
+          "signature": "function checkShutdownStatus(requestId: string): string {",
+          "startLine": 475
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 533
+        }
+      ],
+      "layer": "collaboration",
+      "source": "/**\n * s11_autonomous_agents.ts - Autonomous Agents\n *\n * Idle cycle with task board polling, auto-claiming unclaimed tasks, and\n * identity re-injection after context compression. Builds on s10's protocols.\n *\n *     Teammate lifecycle:\n *     +-------+\n *     | spawn |\n *     +---+---+\n *         |\n *         v\n *     +-------+  tool_use    +-------+\n *     | WORK  | <----------- |  LLM  |\n *     +---+---+              +-------+\n *         |\n *         | stop_reason != tool_use\n *         v\n *     +--------+\n *     | IDLE   | poll every 5s for up to 60s\n *     +---+----+\n *         |\n *         +---> check inbox -> message? -> resume WORK\n *         |\n *         +---> scan .tasks/ -> unclaimed? -> claim -> resume WORK\n *         |\n *         +---> timeout (60s) -> shutdown\n *\n *     Identity re-injection after compression:\n *     messages = [identity_block, ...remaining...]\n *     \"You are 'coder', role: backend, team: my-team\"\n *\n * Key insight: \"The agent finds work itself.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync, appendFileSync, existsSync, readdirSync } from \"node:fs\";\nimport { resolve, dirname, join } from \"node:path\";\nimport { createInterface } from \"node:readline\";\nimport { randomUUID } from \"node:crypto\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\nconst TEAM_DIR = join(WORKDIR, \".team\");\nconst INBOX_DIR = join(TEAM_DIR, \"inbox\");\nconst TASKS_DIR = join(WORKDIR, \".tasks\");\n\nconst POLL_INTERVAL = 5;\nconst IDLE_TIMEOUT = 60;\n\nconst SYSTEM = `You are a team lead at ${WORKDIR}. Teammates are autonomous -- they find work themselves.`;\n\nconst VALID_MSG_TYPES = [\n  \"message\",\n  \"broadcast\",\n  \"shutdown_request\",\n  \"shutdown_response\",\n  \"plan_approval_response\",\n];\n\n// -- Request trackers --\nconst shutdownRequests: Record<string, { target?: string; from?: string; status: string }> = {};\nconst planRequests: Record<string, { from: string; plan: string; status: string }> = {};\n\n\n// -- MessageBus: JSONL inbox per teammate --\nclass MessageBus {\n  dir: string;\n\n  constructor(inboxDir: string) {\n    this.dir = inboxDir;\n    mkdirSync(this.dir, { recursive: true });\n  }\n\n  send(sender: string, to: string, content: string,\n       msgType: string = \"message\", extra?: Record<string, unknown>): string {\n    if (!VALID_MSG_TYPES.includes(msgType)) {\n      return `Error: Invalid type '${msgType}'. Valid: ${VALID_MSG_TYPES.join(\", \")}`;\n    }\n    const msg: Record<string, unknown> = {\n      type: msgType,\n      from: sender,\n      content,\n      timestamp: Date.now() / 1000,\n    };\n    if (extra) Object.assign(msg, extra);\n    const inboxPath = join(this.dir, `${to}.jsonl`);\n    appendFileSync(inboxPath, JSON.stringify(msg) + \"\\n\");\n    return `Sent ${msgType} to ${to}`;\n  }\n\n  readInbox(name: string): Record<string, unknown>[] {\n    const inboxPath = join(this.dir, `${name}.jsonl`);\n    if (!existsSync(inboxPath)) return [];\n    const text = readFileSync(inboxPath, \"utf-8\").trim();\n    const messages: Record<string, unknown>[] = [];\n    for (const line of text.split(\"\\n\")) {\n      if (line) messages.push(JSON.parse(line));\n    }\n    writeFileSync(inboxPath, \"\");\n    return messages;\n  }\n\n  broadcast(sender: string, content: string, teammates: string[]): string {\n    let count = 0;\n    for (const name of teammates) {\n      if (name !== sender) {\n        this.send(sender, name, content, \"broadcast\");\n        count++;\n      }\n    }\n    return `Broadcast to ${count} teammates`;\n  }\n}\n\nconst BUS = new MessageBus(INBOX_DIR);\n\n\n// -- Task board scanning --\ninterface TaskFile {\n  id: number;\n  subject: string;\n  description?: string;\n  status: string;\n  owner?: string;\n  blockedBy?: number[];\n}\n\nfunction scanUnclaimedTasks(): TaskFile[] {\n  mkdirSync(TASKS_DIR, { recursive: true });\n  const unclaimed: TaskFile[] = [];\n  const files = readdirSync(TASKS_DIR).filter((f) => f.startsWith(\"task_\") && f.endsWith(\".json\")).sort();\n  for (const f of files) {\n    const task: TaskFile = JSON.parse(readFileSync(join(TASKS_DIR, f), \"utf-8\"));\n    if (task.status === \"pending\" && !task.owner && (!task.blockedBy || task.blockedBy.length === 0)) {\n      unclaimed.push(task);\n    }\n  }\n  return unclaimed;\n}\n\nfunction claimTask(taskId: number, owner: string): string {\n  const path = join(TASKS_DIR, `task_${taskId}.json`);\n  if (!existsSync(path)) return `Error: Task ${taskId} not found`;\n  const task: TaskFile = JSON.parse(readFileSync(path, \"utf-8\"));\n  task.owner = owner;\n  task.status = \"in_progress\";\n  writeFileSync(path, JSON.stringify(task, null, 2));\n  return `Claimed task #${taskId} for ${owner}`;\n}\n\n\n// -- Identity re-injection after compression --\nfunction makeIdentityBlock(name: string, role: string, teamName: string): Anthropic.Messages.MessageParam {\n  return {\n    role: \"user\",\n    content: `<identity>You are '${name}', role: ${role}, team: ${teamName}. Continue your work.</identity>`,\n  };\n}\n\n\n// -- Autonomous TeammateManager --\ninterface MemberConfig { name: string; role: string; status: string }\ninterface TeamConfig { team_name: string; members: MemberConfig[] }\n\nclass TeammateManager {\n  dir: string;\n  configPath: string;\n  config: TeamConfig;\n\n  constructor(teamDir: string) {\n    this.dir = teamDir;\n    mkdirSync(this.dir, { recursive: true });\n    this.configPath = join(this.dir, \"config.json\");\n    this.config = this._loadConfig();\n  }\n\n  _loadConfig(): TeamConfig {\n    if (existsSync(this.configPath)) {\n      return JSON.parse(readFileSync(this.configPath, \"utf-8\"));\n    }\n    return { team_name: \"default\", members: [] };\n  }\n\n  _saveConfig(): void {\n    writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));\n  }\n\n  _findMember(name: string): MemberConfig | undefined {\n    return this.config.members.find((m) => m.name === name);\n  }\n\n  _setStatus(name: string, status: string): void {\n    const member = this._findMember(name);\n    if (member) {\n      member.status = status;\n      this._saveConfig();\n    }\n  }\n\n  spawn(name: string, role: string, prompt: string): string {\n    let member = this._findMember(name);\n    if (member) {\n      if (member.status !== \"idle\" && member.status !== \"shutdown\") {\n        return `Error: '${name}' is currently ${member.status}`;\n      }\n      member.status = \"working\";\n      member.role = role;\n    } else {\n      member = { name, role, status: \"working\" };\n      this.config.members.push(member);\n    }\n    this._saveConfig();\n    // Fire-and-forget async teammate loop\n    this._loop(name, role, prompt);\n    return `Spawned '${name}' (role: ${role})`;\n  }\n\n  async _loop(name: string, role: string, prompt: string): Promise<void> {\n    const teamName = this.config.team_name;\n    const sysPrompt =\n      `You are '${name}', role: ${role}, team: ${teamName}, at ${WORKDIR}. ` +\n      `Use idle tool when you have no more work. You will auto-claim new tasks.`;\n    const messages: Anthropic.Messages.MessageParam[] = [{ role: \"user\", content: prompt }];\n    const tools = this._teammateTools();\n\n    while (true) {\n      // -- WORK PHASE: standard agent loop --\n      for (let i = 0; i < 50; i++) {\n        const inbox = BUS.readInbox(name);\n        for (const msg of inbox) {\n          if (msg.type === \"shutdown_request\") {\n            this._setStatus(name, \"shutdown\");\n            return;\n          }\n          messages.push({ role: \"user\", content: JSON.stringify(msg) });\n        }\n        let response: Anthropic.Messages.Message;\n        try {\n          response = await client.messages.create({\n            model: MODEL, system: sysPrompt, messages, tools, max_tokens: 8000,\n          });\n        } catch {\n          this._setStatus(name, \"idle\");\n          return;\n        }\n        messages.push({ role: \"assistant\", content: response.content });\n        if (response.stop_reason !== \"tool_use\") break;\n\n        const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n        let idleRequested = false;\n        for (const block of response.content) {\n          if (block.type === \"tool_use\") {\n            let output: string;\n            if (block.name === \"idle\") {\n              idleRequested = true;\n              output = \"Entering idle phase. Will poll for new tasks.\";\n            } else {\n              output = this._exec(name, block.name, block.input as Record<string, unknown>);\n            }\n            console.log(`  [${name}] ${block.name}: ${String(output).slice(0, 120)}`);\n            results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n          }\n        }\n        messages.push({ role: \"user\", content: results });\n        if (idleRequested) break;\n      }\n\n      // -- IDLE PHASE: poll for inbox messages and unclaimed tasks --\n      this._setStatus(name, \"idle\");\n      let resume = false;\n      const polls = Math.floor(IDLE_TIMEOUT / Math.max(POLL_INTERVAL, 1));\n\n      for (let p = 0; p < polls; p++) {\n        await new Promise((r) => setTimeout(r, POLL_INTERVAL * 1000));\n\n        const inbox = BUS.readInbox(name);\n        if (inbox.length > 0) {\n          for (const msg of inbox) {\n            if (msg.type === \"shutdown_request\") {\n              this._setStatus(name, \"shutdown\");\n              return;\n            }\n            messages.push({ role: \"user\", content: JSON.stringify(msg) });\n          }\n          resume = true;\n          break;\n        }\n\n        const unclaimed = scanUnclaimedTasks();\n        if (unclaimed.length > 0) {\n          const task = unclaimed[0];\n          claimTask(task.id, name);\n          const taskPrompt =\n            `<auto-claimed>Task #${task.id}: ${task.subject}\\n` +\n            `${task.description || \"\"}</auto-claimed>`;\n          if (messages.length <= 3) {\n            messages.unshift(makeIdentityBlock(name, role, teamName));\n            messages.splice(1, 0, { role: \"assistant\", content: `I am ${name}. Continuing.` });\n          }\n          messages.push({ role: \"user\", content: taskPrompt });\n          messages.push({ role: \"assistant\", content: `Claimed task #${task.id}. Working on it.` });\n          resume = true;\n          break;\n        }\n      }\n\n      if (!resume) {\n        this._setStatus(name, \"shutdown\");\n        return;\n      }\n      this._setStatus(name, \"working\");\n    }\n  }\n\n  _exec(sender: string, toolName: string, args: Record<string, unknown>): string {\n    if (toolName === \"bash\") return runBash(args.command as string);\n    if (toolName === \"read_file\") return runRead(args.path as string);\n    if (toolName === \"write_file\") return runWrite(args.path as string, args.content as string);\n    if (toolName === \"edit_file\") return runEdit(args.path as string, args.old_text as string, args.new_text as string);\n    if (toolName === \"send_message\") return BUS.send(sender, args.to as string, args.content as string, (args.msg_type as string) || \"message\");\n    if (toolName === \"read_inbox\") return JSON.stringify(BUS.readInbox(sender), null, 2);\n    if (toolName === \"shutdown_response\") {\n      const reqId = args.request_id as string;\n      const approve = args.approve as boolean;\n      if (reqId in shutdownRequests) {\n        shutdownRequests[reqId].status = approve ? \"approved\" : \"rejected\";\n      }\n      BUS.send(\n        sender, \"lead\", (args.reason as string) || \"\",\n        \"shutdown_response\", { request_id: reqId, approve },\n      );\n      return `Shutdown ${approve ? \"approved\" : \"rejected\"}`;\n    }\n    if (toolName === \"plan_approval\") {\n      const planText = (args.plan as string) || \"\";\n      const reqId = randomUUID().slice(0, 8);\n      planRequests[reqId] = { from: sender, plan: planText, status: \"pending\" };\n      BUS.send(\n        sender, \"lead\", planText, \"plan_approval_response\",\n        { request_id: reqId, plan: planText },\n      );\n      return `Plan submitted (request_id=${reqId}). Waiting for approval.`;\n    }\n    if (toolName === \"claim_task\") return claimTask(args.task_id as number, sender);\n    return `Unknown tool: ${toolName}`;\n  }\n\n  _teammateTools(): Anthropic.Messages.Tool[] {\n    return [\n      { name: \"bash\", description: \"Run a shell command.\",\n        input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n      { name: \"read_file\", description: \"Read file contents.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" } }, required: [\"path\"] } },\n      { name: \"write_file\", description: \"Write content to file.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n      { name: \"edit_file\", description: \"Replace exact text in file.\",\n        input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n      { name: \"send_message\", description: \"Send message to a teammate.\",\n        input_schema: { type: \"object\" as const, properties: { to: { type: \"string\" }, content: { type: \"string\" }, msg_type: { type: \"string\", enum: VALID_MSG_TYPES } }, required: [\"to\", \"content\"] } },\n      { name: \"read_inbox\", description: \"Read and drain your inbox.\",\n        input_schema: { type: \"object\" as const, properties: {} } },\n      { name: \"shutdown_response\", description: \"Respond to a shutdown request.\",\n        input_schema: { type: \"object\" as const, properties: { request_id: { type: \"string\" }, approve: { type: \"boolean\" }, reason: { type: \"string\" } }, required: [\"request_id\", \"approve\"] } },\n      { name: \"plan_approval\", description: \"Submit a plan for lead approval.\",\n        input_schema: { type: \"object\" as const, properties: { plan: { type: \"string\" } }, required: [\"plan\"] } },\n      { name: \"idle\", description: \"Signal that you have no more work. Enters idle polling phase.\",\n        input_schema: { type: \"object\" as const, properties: {} } },\n      { name: \"claim_task\", description: \"Claim a task from the task board by ID.\",\n        input_schema: { type: \"object\" as const, properties: { task_id: { type: \"integer\" } }, required: [\"task_id\"] } },\n    ];\n  }\n\n  listAll(): string {\n    if (this.config.members.length === 0) return \"No teammates.\";\n    const lines = [`Team: ${this.config.team_name}`];\n    for (const m of this.config.members) {\n      lines.push(`  ${m.name} (${m.role}): ${m.status}`);\n    }\n    return lines.join(\"\\n\");\n  }\n\n  memberNames(): string[] {\n    return this.config.members.map((m) => m.name);\n  }\n}\n\nconst TEAM = new TeammateManager(TEAM_DIR);\n\n\n// -- Base tool implementations --\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, { cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000, maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\", stdio: [\"pipe\", \"pipe\", \"pipe\"] });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const content = readFileSync(fp, \"utf-8\");\n    if (!content.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, content.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\n\n// -- Lead-specific protocol handlers --\nfunction handleShutdownRequest(teammate: string): string {\n  const reqId = randomUUID().slice(0, 8);\n  shutdownRequests[reqId] = { target: teammate, status: \"pending\" };\n  BUS.send(\n    \"lead\", teammate, \"Please shut down gracefully.\",\n    \"shutdown_request\", { request_id: reqId },\n  );\n  return `Shutdown request ${reqId} sent to '${teammate}'`;\n}\n\nfunction handlePlanReview(requestId: string, approve: boolean, feedback: string = \"\"): string {\n  const req = planRequests[requestId];\n  if (!req) return `Error: Unknown plan request_id '${requestId}'`;\n  req.status = approve ? \"approved\" : \"rejected\";\n  BUS.send(\n    \"lead\", req.from, feedback, \"plan_approval_response\",\n    { request_id: requestId, approve, feedback },\n  );\n  return `Plan ${req.status} for '${req.from}'`;\n}\n\nfunction checkShutdownStatus(requestId: string): string {\n  return JSON.stringify(shutdownRequests[requestId] || { error: \"not found\" });\n}\n\n\n// -- Lead tool dispatch (14 tools) --\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:              (input) => runBash(input.command as string),\n  read_file:         (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file:        (input) => runWrite(input.path as string, input.content as string),\n  edit_file:         (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  spawn_teammate:    (input) => TEAM.spawn(input.name as string, input.role as string, input.prompt as string),\n  list_teammates:    () => TEAM.listAll(),\n  send_message:      (input) => BUS.send(\"lead\", input.to as string, input.content as string, (input.msg_type as string) || \"message\"),\n  read_inbox:        () => JSON.stringify(BUS.readInbox(\"lead\"), null, 2),\n  broadcast:         (input) => BUS.broadcast(\"lead\", input.content as string, TEAM.memberNames()),\n  shutdown_request:  (input) => handleShutdownRequest(input.teammate as string),\n  shutdown_response: (input) => checkShutdownStatus((input.request_id as string) || \"\"),\n  plan_approval:     (input) => handlePlanReview(input.request_id as string, input.approve as boolean, (input.feedback as string) || \"\"),\n  idle:              () => \"Lead does not idle.\",\n  claim_task:        (input) => claimTask(input.task_id as number, \"lead\"),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command.\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"spawn_teammate\", description: \"Spawn an autonomous teammate.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\" }, role: { type: \"string\" }, prompt: { type: \"string\" } }, required: [\"name\", \"role\", \"prompt\"] } },\n  { name: \"list_teammates\", description: \"List all teammates.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"send_message\", description: \"Send a message to a teammate.\",\n    input_schema: { type: \"object\" as const, properties: { to: { type: \"string\" }, content: { type: \"string\" }, msg_type: { type: \"string\", enum: VALID_MSG_TYPES } }, required: [\"to\", \"content\"] } },\n  { name: \"read_inbox\", description: \"Read and drain the lead's inbox.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"broadcast\", description: \"Send a message to all teammates.\",\n    input_schema: { type: \"object\" as const, properties: { content: { type: \"string\" } }, required: [\"content\"] } },\n  { name: \"shutdown_request\", description: \"Request a teammate to shut down.\",\n    input_schema: { type: \"object\" as const, properties: { teammate: { type: \"string\" } }, required: [\"teammate\"] } },\n  { name: \"shutdown_response\", description: \"Check shutdown request status.\",\n    input_schema: { type: \"object\" as const, properties: { request_id: { type: \"string\" } }, required: [\"request_id\"] } },\n  { name: \"plan_approval\", description: \"Approve or reject a teammate's plan.\",\n    input_schema: { type: \"object\" as const, properties: { request_id: { type: \"string\" }, approve: { type: \"boolean\" }, feedback: { type: \"string\" } }, required: [\"request_id\", \"approve\"] } },\n  { name: \"idle\", description: \"Enter idle state (for lead -- rarely used).\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"claim_task\", description: \"Claim a task from the board by ID.\",\n    input_schema: { type: \"object\" as const, properties: { task_id: { type: \"integer\" } }, required: [\"task_id\"] } },\n];\n\n\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const inbox = BUS.readInbox(\"lead\");\n    if (inbox.length > 0) {\n      messages.push({\n        role: \"user\",\n        content: `<inbox>${JSON.stringify(inbox, null, 2)}</inbox>`,\n      });\n      messages.push({\n        role: \"assistant\",\n        content: \"Noted inbox messages.\",\n      });\n    }\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try {\n          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        } catch (e: unknown) {\n          output = `Error: ${e instanceof Error ? e.message : e}`;\n        }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n\n// -- Interactive REPL --\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms11 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    if (query.trim() === \"/team\") {\n      console.log(TEAM.listAll());\n      prompt();\n      return;\n    }\n    if (query.trim() === \"/inbox\") {\n      console.log(JSON.stringify(BUS.readInbox(\"lead\"), null, 2));\n      prompt();\n      return;\n    }\n    if (query.trim() === \"/tasks\") {\n      mkdirSync(TASKS_DIR, { recursive: true });\n      const files = readdirSync(TASKS_DIR).filter((f) => f.startsWith(\"task_\") && f.endsWith(\".json\")).sort();\n      for (const f of files) {\n        const t: TaskFile = JSON.parse(readFileSync(join(TASKS_DIR, f), \"utf-8\"));\n        const marker: Record<string, string> = { pending: \"[ ]\", in_progress: \"[>]\", completed: \"[x]\" };\n        const owner = t.owner ? ` @${t.owner}` : \"\";\n        console.log(`  ${marker[t.status] || \"[?]\"} #${t.id}: ${t.subject}${owner}`);\n      }\n      prompt();\n      return;\n    }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) {\n        if ((block as Anthropic.Messages.TextBlock).type === \"text\") {\n          console.log((block as Anthropic.Messages.TextBlock).text);\n        }\n      }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    },
+    {
+      "id": "s12",
+      "filename": "s12_worktree_task_isolation.ts",
+      "title": "Worktree + Task Isolation",
+      "subtitle": "Isolate by Directory",
+      "loc": 603,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "task_create",
+        "task_list",
+        "task_get",
+        "task_update",
+        "task_bind_worktree",
+        "worktree_create",
+        "worktree_list",
+        "worktree_status",
+        "worktree_run",
+        "worktree_remove",
+        "worktree_keep",
+        "worktree_events"
+      ],
+      "newTools": [
+        "task_create",
+        "task_list",
+        "task_get",
+        "task_update",
+        "task_bind_worktree",
+        "worktree_create",
+        "worktree_list",
+        "worktree_status",
+        "worktree_run",
+        "worktree_remove",
+        "worktree_keep",
+        "worktree_events"
+      ],
+      "coreAddition": "Composable worktree lifecycle + event stream over a shared task board",
+      "keyInsight": "Each works in its own directory; tasks manage goals, worktrees manage directories, bound by ID",
+      "classes": [
+        {
+          "name": "EventBus",
+          "startLine": 74,
+          "endLine": 112
+        },
+        {
+          "name": "TaskManager",
+          "startLine": 127,
+          "endLine": 233
+        },
+        {
+          "name": "WorktreeManager",
+          "startLine": 254,
+          "endLine": 513
+        }
+      ],
+      "functions": [
+        {
+          "name": "detectRepoRoot",
+          "signature": "function detectRepoRoot(cwd: string): string | null {",
+          "startLine": 50
+        },
+        {
+          "name": "safePath",
+          "signature": "function safePath(p: string): string {",
+          "startLine": 518
+        },
+        {
+          "name": "runBash",
+          "signature": "function runBash(command: string): string {",
+          "startLine": 524
+        },
+        {
+          "name": "runRead",
+          "signature": "function runRead(path: string, limit?: number): string {",
+          "startLine": 543
+        },
+        {
+          "name": "runWrite",
+          "signature": "function runWrite(path: string, content: string): string {",
+          "startLine": 552
+        },
+        {
+          "name": "runEdit",
+          "signature": "function runEdit(path: string, oldText: string, newText: string): string {",
+          "startLine": 561
+        },
+        {
+          "name": "agentLoop",
+          "signature": "async function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {",
+          "startLine": 630
+        }
+      ],
+      "layer": "collaboration",
+      "source": "/**\n * s12_worktree_task_isolation.ts - Worktree + Task Isolation\n *\n * Directory-level isolation for parallel task execution.\n * Tasks are the control plane and worktrees are the execution plane.\n *\n *     .tasks/task_12.json\n *       {\n *         \"id\": 12,\n *         \"subject\": \"Implement auth refactor\",\n *         \"status\": \"in_progress\",\n *         \"worktree\": \"auth-refactor\"\n *       }\n *\n *     .worktrees/index.json\n *       {\n *         \"worktrees\": [\n *           {\n *             \"name\": \"auth-refactor\",\n *             \"path\": \".../.worktrees/auth-refactor\",\n *             \"branch\": \"wt/auth-refactor\",\n *             \"task_id\": 12,\n *             \"status\": \"active\"\n *           }\n *         ]\n *       }\n *\n * Key insight: \"Isolate by directory, coordinate by task ID.\"\n */\n\nimport Anthropic from \"@anthropic-ai/sdk\";\nimport { execSync } from \"node:child_process\";\nimport { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, appendFileSync } from \"node:fs\";\nimport { resolve, dirname, join } from \"node:path\";\nimport { createInterface } from \"node:readline\";\n\nif (typeof (globalThis as Record<string, unknown>).Bun === \"undefined\") {\n  const { config } = await import(\"dotenv\");\n  config({ override: true });\n}\n\nif (process.env.ANTHROPIC_BASE_URL) {\n  delete process.env.ANTHROPIC_AUTH_TOKEN;\n}\n\nconst WORKDIR = process.cwd();\nconst client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL || undefined });\nconst MODEL = process.env.MODEL_ID!;\n\nfunction detectRepoRoot(cwd: string): string | null {\n  try {\n    const result = execSync(\"git rev-parse --show-toplevel\", {\n      cwd,\n      encoding: \"utf-8\",\n      timeout: 10_000,\n      stdio: [\"pipe\", \"pipe\", \"pipe\"],\n    }).trim();\n    return result && existsSync(result) ? result : null;\n  } catch {\n    return null;\n  }\n}\n\nconst REPO_ROOT = detectRepoRoot(WORKDIR) || WORKDIR;\n\nconst SYSTEM =\n  `You are a coding agent at ${WORKDIR}. ` +\n  \"Use task + worktree tools for multi-task work. \" +\n  \"For parallel or risky changes: create tasks, allocate worktree lanes, \" +\n  \"run commands in those lanes, then choose keep/remove for closeout. \" +\n  \"Use worktree_events when you need lifecycle visibility.\";\n\n// -- EventBus: append-only lifecycle events for observability --\nclass EventBus {\n  private path: string;\n\n  constructor(eventLogPath: string) {\n    this.path = eventLogPath;\n    mkdirSync(dirname(eventLogPath), { recursive: true });\n    if (!existsSync(this.path)) writeFileSync(this.path, \"\");\n  }\n\n  emit(\n    event: string,\n    task: Record<string, unknown> = {},\n    worktree: Record<string, unknown> = {},\n    error?: string,\n  ): void {\n    const payload: Record<string, unknown> = {\n      event,\n      ts: Date.now() / 1000,\n      task,\n      worktree,\n    };\n    if (error) payload.error = error;\n    appendFileSync(this.path, JSON.stringify(payload) + \"\\n\");\n  }\n\n  listRecent(limit: number = 20): string {\n    const n = Math.max(1, Math.min(limit || 20, 200));\n    const lines = readFileSync(this.path, \"utf-8\").split(\"\\n\").filter(Boolean);\n    const recent = lines.slice(-n);\n    const items = recent.map((line) => {\n      try {\n        return JSON.parse(line);\n      } catch {\n        return { event: \"parse_error\", raw: line };\n      }\n    });\n    return JSON.stringify(items, null, 2);\n  }\n}\n\n// -- TaskManager: persistent task board with optional worktree binding --\ninterface TaskData {\n  id: number;\n  subject: string;\n  description: string;\n  status: string;\n  owner: string;\n  worktree: string;\n  blockedBy: number[];\n  created_at: number;\n  updated_at: number;\n}\n\nclass TaskManager {\n  private dir: string;\n  private nextId: number;\n\n  constructor(tasksDir: string) {\n    this.dir = tasksDir;\n    mkdirSync(tasksDir, { recursive: true });\n    this.nextId = this.maxId() + 1;\n  }\n\n  private maxId(): number {\n    const ids: number[] = [];\n    for (const f of readdirSync(this.dir)) {\n      const m = f.match(/^task_(\\d+)\\.json$/);\n      if (m) ids.push(parseInt(m[1], 10));\n    }\n    return ids.length > 0 ? Math.max(...ids) : 0;\n  }\n\n  private taskPath(taskId: number): string {\n    return join(this.dir, `task_${taskId}.json`);\n  }\n\n  private load(taskId: number): TaskData {\n    const p = this.taskPath(taskId);\n    if (!existsSync(p)) throw new Error(`Task ${taskId} not found`);\n    return JSON.parse(readFileSync(p, \"utf-8\"));\n  }\n\n  private save(task: TaskData): void {\n    writeFileSync(this.taskPath(task.id), JSON.stringify(task, null, 2));\n  }\n\n  taskExists(taskId: number): boolean {\n    return existsSync(this.taskPath(taskId));\n  }\n\n  create(subject: string, description: string = \"\"): string {\n    const task: TaskData = {\n      id: this.nextId,\n      subject,\n      description,\n      status: \"pending\",\n      owner: \"\",\n      worktree: \"\",\n      blockedBy: [],\n      created_at: Date.now() / 1000,\n      updated_at: Date.now() / 1000,\n    };\n    this.save(task);\n    this.nextId += 1;\n    return JSON.stringify(task, null, 2);\n  }\n\n  get(taskId: number): string {\n    return JSON.stringify(this.load(taskId), null, 2);\n  }\n\n  update(taskId: number, status?: string, owner?: string): string {\n    const task = this.load(taskId);\n    if (status) {\n      if (![\"pending\", \"in_progress\", \"completed\"].includes(status)) {\n        throw new Error(`Invalid status: ${status}`);\n      }\n      task.status = status;\n    }\n    if (owner !== undefined) task.owner = owner;\n    task.updated_at = Date.now() / 1000;\n    this.save(task);\n    return JSON.stringify(task, null, 2);\n  }\n\n  bindWorktree(taskId: number, worktree: string, owner: string = \"\"): string {\n    const task = this.load(taskId);\n    task.worktree = worktree;\n    if (owner) task.owner = owner;\n    if (task.status === \"pending\") task.status = \"in_progress\";\n    task.updated_at = Date.now() / 1000;\n    this.save(task);\n    return JSON.stringify(task, null, 2);\n  }\n\n  unbindWorktree(taskId: number): string {\n    const task = this.load(taskId);\n    task.worktree = \"\";\n    task.updated_at = Date.now() / 1000;\n    this.save(task);\n    return JSON.stringify(task, null, 2);\n  }\n\n  listAll(): string {\n    const files = readdirSync(this.dir)\n      .filter((f) => /^task_\\d+\\.json$/.test(f))\n      .sort();\n    if (files.length === 0) return \"No tasks.\";\n    const lines: string[] = [];\n    for (const f of files) {\n      const t: TaskData = JSON.parse(readFileSync(join(this.dir, f), \"utf-8\"));\n      const marker: Record<string, string> = { pending: \"[ ]\", in_progress: \"[>]\", completed: \"[x]\" };\n      const m = marker[t.status] || \"[?]\";\n      const ownerStr = t.owner ? ` owner=${t.owner}` : \"\";\n      const wtStr = t.worktree ? ` wt=${t.worktree}` : \"\";\n      lines.push(`${m} #${t.id}: ${t.subject}${ownerStr}${wtStr}`);\n    }\n    return lines.join(\"\\n\");\n  }\n}\n\nconst TASKS = new TaskManager(join(REPO_ROOT, \".tasks\"));\nconst EVENTS = new EventBus(join(REPO_ROOT, \".worktrees\", \"events.jsonl\"));\n\n// -- WorktreeManager: create/list/run/remove git worktrees + lifecycle index --\ninterface WorktreeEntry {\n  name: string;\n  path: string;\n  branch: string;\n  task_id: number | null;\n  status: string;\n  created_at?: number;\n  removed_at?: number;\n  kept_at?: number;\n}\n\ninterface WorktreeIndex {\n  worktrees: WorktreeEntry[];\n}\n\nclass WorktreeManager {\n  private repoRoot: string;\n  private tasks: TaskManager;\n  private events: EventBus;\n  private dir: string;\n  private indexPath: string;\n  gitAvailable: boolean;\n\n  constructor(repoRoot: string, tasks: TaskManager, events: EventBus) {\n    this.repoRoot = repoRoot;\n    this.tasks = tasks;\n    this.events = events;\n    this.dir = join(repoRoot, \".worktrees\");\n    mkdirSync(this.dir, { recursive: true });\n    this.indexPath = join(this.dir, \"index.json\");\n    if (!existsSync(this.indexPath)) {\n      writeFileSync(this.indexPath, JSON.stringify({ worktrees: [] }, null, 2));\n    }\n    this.gitAvailable = this.isGitRepo();\n  }\n\n  private isGitRepo(): boolean {\n    try {\n      execSync(\"git rev-parse --is-inside-work-tree\", {\n        cwd: this.repoRoot,\n        encoding: \"utf-8\",\n        timeout: 10_000,\n        stdio: [\"pipe\", \"pipe\", \"pipe\"],\n      });\n      return true;\n    } catch {\n      return false;\n    }\n  }\n\n  private runGit(args: string[]): string {\n    if (!this.gitAvailable) {\n      throw new Error(\"Not in a git repository. worktree tools require git.\");\n    }\n    try {\n      const stdout = execSync(`git ${args.join(\" \")}`, {\n        cwd: this.repoRoot,\n        encoding: \"utf-8\",\n        timeout: 120_000,\n        stdio: [\"pipe\", \"pipe\", \"pipe\"],\n        maxBuffer: 10 * 1024 * 1024,\n      });\n      return (stdout ?? \"\").trim() || \"(no output)\";\n    } catch (err: unknown) {\n      const e = err as { stdout?: string; stderr?: string; message?: string };\n      const msg = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n      throw new Error(msg || `git ${args.join(\" \")} failed`);\n    }\n  }\n\n  private loadIndex(): WorktreeIndex {\n    return JSON.parse(readFileSync(this.indexPath, \"utf-8\"));\n  }\n\n  private saveIndex(data: WorktreeIndex): void {\n    writeFileSync(this.indexPath, JSON.stringify(data, null, 2));\n  }\n\n  private find(name: string): WorktreeEntry | null {\n    const idx = this.loadIndex();\n    return idx.worktrees.find((wt) => wt.name === name) || null;\n  }\n\n  private validateName(name: string): void {\n    if (!/^[A-Za-z0-9._-]{1,40}$/.test(name || \"\")) {\n      throw new Error(\"Invalid worktree name. Use 1-40 chars: letters, numbers, ., _, -\");\n    }\n  }\n\n  create(name: string, taskId?: number, baseRef: string = \"HEAD\"): string {\n    this.validateName(name);\n    if (this.find(name)) throw new Error(`Worktree '${name}' already exists in index`);\n    if (taskId !== undefined && !this.tasks.taskExists(taskId)) {\n      throw new Error(`Task ${taskId} not found`);\n    }\n\n    const wtPath = join(this.dir, name);\n    const branch = `wt/${name}`;\n    this.events.emit(\n      \"worktree.create.before\",\n      taskId !== undefined ? { id: taskId } : {},\n      { name, base_ref: baseRef },\n    );\n    try {\n      this.runGit([\"worktree\", \"add\", \"-b\", branch, wtPath, baseRef]);\n\n      const entry: WorktreeEntry = {\n        name,\n        path: wtPath,\n        branch,\n        task_id: taskId ?? null,\n        status: \"active\",\n        created_at: Date.now() / 1000,\n      };\n\n      const idx = this.loadIndex();\n      idx.worktrees.push(entry);\n      this.saveIndex(idx);\n\n      if (taskId !== undefined) {\n        this.tasks.bindWorktree(taskId, name);\n      }\n\n      this.events.emit(\n        \"worktree.create.after\",\n        taskId !== undefined ? { id: taskId } : {},\n        { name, path: wtPath, branch, status: \"active\" },\n      );\n      return JSON.stringify(entry, null, 2);\n    } catch (e: unknown) {\n      this.events.emit(\n        \"worktree.create.failed\",\n        taskId !== undefined ? { id: taskId } : {},\n        { name, base_ref: baseRef },\n        e instanceof Error ? e.message : String(e),\n      );\n      throw e;\n    }\n  }\n\n  listAll(): string {\n    const idx = this.loadIndex();\n    const wts = idx.worktrees;\n    if (wts.length === 0) return \"No worktrees in index.\";\n    const lines: string[] = [];\n    for (const wt of wts) {\n      const suffix = wt.task_id != null ? ` task=${wt.task_id}` : \"\";\n      lines.push(\n        `[${wt.status || \"unknown\"}] ${wt.name} -> ${wt.path} (${wt.branch || \"-\"})${suffix}`,\n      );\n    }\n    return lines.join(\"\\n\");\n  }\n\n  status(name: string): string {\n    const wt = this.find(name);\n    if (!wt) return `Error: Unknown worktree '${name}'`;\n    if (!existsSync(wt.path)) return `Error: Worktree path missing: ${wt.path}`;\n    try {\n      const stdout = execSync(\"git status --short --branch\", {\n        cwd: wt.path,\n        encoding: \"utf-8\",\n        timeout: 60_000,\n        stdio: [\"pipe\", \"pipe\", \"pipe\"],\n      });\n      const text = (stdout ?? \"\").trim();\n      return text || \"Clean worktree\";\n    } catch (err: unknown) {\n      const e = err as { stdout?: string; stderr?: string; message?: string };\n      return ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim() || \"Clean worktree\";\n    }\n  }\n\n  run(name: string, command: string): string {\n    const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n    if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n\n    const wt = this.find(name);\n    if (!wt) return `Error: Unknown worktree '${name}'`;\n    if (!existsSync(wt.path)) return `Error: Worktree path missing: ${wt.path}`;\n\n    try {\n      const stdout = execSync(command, {\n        cwd: wt.path,\n        shell: \"/bin/sh\",\n        encoding: \"utf-8\",\n        timeout: 300_000,\n        maxBuffer: 10 * 1024 * 1024,\n        stdio: [\"pipe\", \"pipe\", \"pipe\"],\n      });\n      const out = (stdout ?? \"\").trim();\n      return out ? out.slice(0, 50_000) : \"(no output)\";\n    } catch (err: unknown) {\n      if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (300s)\";\n      const e = err as { stdout?: string; stderr?: string; message?: string };\n      const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n      return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n    }\n  }\n\n  remove(name: string, force: boolean = false, completeTask: boolean = false): string {\n    const wt = this.find(name);\n    if (!wt) return `Error: Unknown worktree '${name}'`;\n\n    this.events.emit(\n      \"worktree.remove.before\",\n      wt.task_id != null ? { id: wt.task_id } : {},\n      { name, path: wt.path },\n    );\n    try {\n      const args = [\"worktree\", \"remove\"];\n      if (force) args.push(\"--force\");\n      args.push(wt.path);\n      this.runGit(args);\n\n      if (completeTask && wt.task_id != null) {\n        const before = JSON.parse(this.tasks.get(wt.task_id));\n        this.tasks.update(wt.task_id, \"completed\");\n        this.tasks.unbindWorktree(wt.task_id);\n        this.events.emit(\n          \"task.completed\",\n          { id: wt.task_id, subject: before.subject || \"\", status: \"completed\" },\n          { name },\n        );\n      }\n\n      const idx = this.loadIndex();\n      for (const item of idx.worktrees) {\n        if (item.name === name) {\n          item.status = \"removed\";\n          item.removed_at = Date.now() / 1000;\n        }\n      }\n      this.saveIndex(idx);\n\n      this.events.emit(\n        \"worktree.remove.after\",\n        wt.task_id != null ? { id: wt.task_id } : {},\n        { name, path: wt.path, status: \"removed\" },\n      );\n      return `Removed worktree '${name}'`;\n    } catch (e: unknown) {\n      this.events.emit(\n        \"worktree.remove.failed\",\n        wt.task_id != null ? { id: wt.task_id } : {},\n        { name, path: wt.path },\n        e instanceof Error ? e.message : String(e),\n      );\n      throw e;\n    }\n  }\n\n  keep(name: string): string {\n    const wt = this.find(name);\n    if (!wt) return `Error: Unknown worktree '${name}'`;\n\n    const idx = this.loadIndex();\n    let kept: WorktreeEntry | null = null;\n    for (const item of idx.worktrees) {\n      if (item.name === name) {\n        item.status = \"kept\";\n        item.kept_at = Date.now() / 1000;\n        kept = item;\n      }\n    }\n    this.saveIndex(idx);\n\n    this.events.emit(\n      \"worktree.keep\",\n      wt.task_id != null ? { id: wt.task_id } : {},\n      { name, path: wt.path, status: \"kept\" },\n    );\n    return kept ? JSON.stringify(kept, null, 2) : `Error: Unknown worktree '${name}'`;\n  }\n}\n\nconst WORKTREES = new WorktreeManager(REPO_ROOT, TASKS, EVENTS);\n\n// -- Base tools (kept minimal, same style as previous sessions) --\nfunction safePath(p: string): string {\n  const resolved = resolve(WORKDIR, p);\n  if (!resolved.startsWith(WORKDIR)) throw new Error(`Path escapes workspace: ${p}`);\n  return resolved;\n}\n\nfunction runBash(command: string): string {\n  const dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"];\n  if (dangerous.some((d) => command.includes(d))) return \"Error: Dangerous command blocked\";\n  try {\n    const stdout = execSync(command, {\n      cwd: WORKDIR, shell: \"/bin/sh\", timeout: 120_000,\n      maxBuffer: 10 * 1024 * 1024, encoding: \"utf-8\",\n      stdio: [\"pipe\", \"pipe\", \"pipe\"],\n    });\n    const out = (stdout ?? \"\").trim();\n    return out ? out.slice(0, 50_000) : \"(no output)\";\n  } catch (err: unknown) {\n    if (err && typeof err === \"object\" && \"killed\" in err && err.killed) return \"Error: Timeout (120s)\";\n    const e = err as { stdout?: string; stderr?: string; message?: string };\n    const out = ((e.stdout ?? \"\") + (e.stderr ?? \"\")).trim();\n    return out ? out.slice(0, 50_000) : `Error: ${e.message}`;\n  }\n}\n\nfunction runRead(path: string, limit?: number): string {\n  try {\n    const text = readFileSync(safePath(path), \"utf-8\");\n    let lines = text.split(\"\\n\");\n    if (limit && limit < lines.length) lines = [...lines.slice(0, limit), `... (${lines.length - limit} more)`];\n    return lines.join(\"\\n\").slice(0, 50_000);\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runWrite(path: string, content: string): string {\n  try {\n    const fp = safePath(path);\n    mkdirSync(dirname(fp), { recursive: true });\n    writeFileSync(fp, content);\n    return `Wrote ${content.length} bytes`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\nfunction runEdit(path: string, oldText: string, newText: string): string {\n  try {\n    const fp = safePath(path);\n    const c = readFileSync(fp, \"utf-8\");\n    if (!c.includes(oldText)) return `Error: Text not found in ${path}`;\n    writeFileSync(fp, c.replace(oldText, newText));\n    return `Edited ${path}`;\n  } catch (e: unknown) { return `Error: ${e instanceof Error ? e.message : e}`; }\n}\n\n// -- Tool dispatch --\ntype ToolInput = Record<string, unknown>;\ntype ToolHandler = (input: ToolInput) => string;\n\nconst TOOL_HANDLERS: Record<string, ToolHandler> = {\n  bash:                (input) => runBash(input.command as string),\n  read_file:           (input) => runRead(input.path as string, input.limit as number | undefined),\n  write_file:          (input) => runWrite(input.path as string, input.content as string),\n  edit_file:           (input) => runEdit(input.path as string, input.old_text as string, input.new_text as string),\n  task_create:         (input) => TASKS.create(input.subject as string, (input.description as string) || \"\"),\n  task_list:           () => TASKS.listAll(),\n  task_get:            (input) => TASKS.get(input.task_id as number),\n  task_update:         (input) => TASKS.update(input.task_id as number, input.status as string | undefined, input.owner as string | undefined),\n  task_bind_worktree:  (input) => TASKS.bindWorktree(input.task_id as number, input.worktree as string, (input.owner as string) || \"\"),\n  worktree_create:     (input) => WORKTREES.create(input.name as string, input.task_id as number | undefined, (input.base_ref as string) || \"HEAD\"),\n  worktree_list:       () => WORKTREES.listAll(),\n  worktree_status:     (input) => WORKTREES.status(input.name as string),\n  worktree_run:        (input) => WORKTREES.run(input.name as string, input.command as string),\n  worktree_keep:       (input) => WORKTREES.keep(input.name as string),\n  worktree_remove:     (input) => WORKTREES.remove(input.name as string, (input.force as boolean) || false, (input.complete_task as boolean) || false),\n  worktree_events:     (input) => EVENTS.listRecent((input.limit as number) || 20),\n};\n\nconst TOOLS: Anthropic.Messages.Tool[] = [\n  { name: \"bash\", description: \"Run a shell command in the current workspace (blocking).\",\n    input_schema: { type: \"object\" as const, properties: { command: { type: \"string\" } }, required: [\"command\"] } },\n  { name: \"read_file\", description: \"Read file contents.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, limit: { type: \"integer\" } }, required: [\"path\"] } },\n  { name: \"write_file\", description: \"Write content to file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, content: { type: \"string\" } }, required: [\"path\", \"content\"] } },\n  { name: \"edit_file\", description: \"Replace exact text in file.\",\n    input_schema: { type: \"object\" as const, properties: { path: { type: \"string\" }, old_text: { type: \"string\" }, new_text: { type: \"string\" } }, required: [\"path\", \"old_text\", \"new_text\"] } },\n  { name: \"task_create\", description: \"Create a new task on the shared task board.\",\n    input_schema: { type: \"object\" as const, properties: { subject: { type: \"string\" }, description: { type: \"string\" } }, required: [\"subject\"] } },\n  { name: \"task_list\", description: \"List all tasks with status, owner, and worktree binding.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"task_get\", description: \"Get task details by ID.\",\n    input_schema: { type: \"object\" as const, properties: { task_id: { type: \"integer\" } }, required: [\"task_id\"] } },\n  { name: \"task_update\", description: \"Update task status or owner.\",\n    input_schema: { type: \"object\" as const, properties: { task_id: { type: \"integer\" }, status: { type: \"string\", enum: [\"pending\", \"in_progress\", \"completed\"] }, owner: { type: \"string\" } }, required: [\"task_id\"] } },\n  { name: \"task_bind_worktree\", description: \"Bind a task to a worktree name.\",\n    input_schema: { type: \"object\" as const, properties: { task_id: { type: \"integer\" }, worktree: { type: \"string\" }, owner: { type: \"string\" } }, required: [\"task_id\", \"worktree\"] } },\n  { name: \"worktree_create\", description: \"Create a git worktree and optionally bind it to a task.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\" }, task_id: { type: \"integer\" }, base_ref: { type: \"string\" } }, required: [\"name\"] } },\n  { name: \"worktree_list\", description: \"List worktrees tracked in .worktrees/index.json.\",\n    input_schema: { type: \"object\" as const, properties: {} } },\n  { name: \"worktree_status\", description: \"Show git status for one worktree.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\" } }, required: [\"name\"] } },\n  { name: \"worktree_run\", description: \"Run a shell command in a named worktree directory.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\" }, command: { type: \"string\" } }, required: [\"name\", \"command\"] } },\n  { name: \"worktree_remove\", description: \"Remove a worktree and optionally mark its bound task completed.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\" }, force: { type: \"boolean\" }, complete_task: { type: \"boolean\" } }, required: [\"name\"] } },\n  { name: \"worktree_keep\", description: \"Mark a worktree as kept in lifecycle state without removing it.\",\n    input_schema: { type: \"object\" as const, properties: { name: { type: \"string\" } }, required: [\"name\"] } },\n  { name: \"worktree_events\", description: \"List recent worktree/task lifecycle events from .worktrees/events.jsonl.\",\n    input_schema: { type: \"object\" as const, properties: { limit: { type: \"integer\" } } } },\n];\n\n// -- Agent loop --\nasync function agentLoop(messages: Anthropic.Messages.MessageParam[]): Promise<void> {\n  while (true) {\n    const response = await client.messages.create({\n      model: MODEL, system: SYSTEM, messages, tools: TOOLS, max_tokens: 8000,\n    });\n    messages.push({ role: \"assistant\", content: response.content });\n    if (response.stop_reason !== \"tool_use\") return;\n\n    const results: Anthropic.Messages.ToolResultBlockParam[] = [];\n    for (const block of response.content) {\n      if (block.type === \"tool_use\") {\n        const handler = TOOL_HANDLERS[block.name];\n        let output: string;\n        try {\n          output = handler ? handler(block.input as ToolInput) : `Unknown tool: ${block.name}`;\n        } catch (e: unknown) {\n          output = `Error: ${e instanceof Error ? e.message : e}`;\n        }\n        console.log(`> ${block.name}: ${String(output).slice(0, 200)}`);\n        results.push({ type: \"tool_result\", tool_use_id: block.id, content: String(output) });\n      }\n    }\n    messages.push({ role: \"user\", content: results });\n  }\n}\n\n// -- Interactive REPL --\nconsole.log(`Repo root for s12: ${REPO_ROOT}`);\nif (!WORKTREES.gitAvailable) {\n  console.log(\"Note: Not in a git repo. worktree_* tools will return errors.\");\n}\n\nconst history: Anthropic.Messages.MessageParam[] = [];\nconst rl = createInterface({ input: process.stdin, output: process.stdout });\n\nconst prompt = (): void => {\n  rl.question(\"\\x1b[36ms12 >> \\x1b[0m\", async (query) => {\n    const trimmed = query.trim().toLowerCase();\n    if (!trimmed || trimmed === \"q\" || trimmed === \"exit\") { rl.close(); return; }\n    history.push({ role: \"user\", content: query });\n    await agentLoop(history);\n    const last = history[history.length - 1];\n    if (last.role === \"assistant\" && Array.isArray(last.content)) {\n      for (const block of last.content) { if (block.type === \"text\") console.log(block.text); }\n    }\n    console.log();\n    prompt();\n  });\n};\n\nprompt();\n"
+    }
+  ],
+  "diffs": [
+    {
+      "from": "s01",
+      "to": "s02",
+      "newClasses": [],
+      "newFunctions": [
+        "safePath",
+        "runRead",
+        "runWrite",
+        "runEdit"
+      ],
+      "newTools": [
+        "read_file",
+        "write_file",
+        "edit_file"
+      ],
+      "locDelta": 39
+    },
+    {
+      "from": "s02",
+      "to": "s03",
+      "newClasses": [
+        "TodoManager"
+      ],
+      "newFunctions": [],
+      "newTools": [
+        "todo"
+      ],
+      "locDelta": 70
+    },
+    {
+      "from": "s03",
+      "to": "s04",
+      "newClasses": [],
+      "newFunctions": [
+        "runSubagent"
+      ],
+      "newTools": [
+        "task"
+      ],
+      "locDelta": -62
+    },
+    {
+      "from": "s04",
+      "to": "s05",
+      "newClasses": [
+        "SkillLoader"
+      ],
+      "newFunctions": [],
+      "newTools": [
+        "load_skill"
+      ],
+      "locDelta": 32
+    },
+    {
+      "from": "s05",
+      "to": "s06",
+      "newClasses": [],
+      "newFunctions": [
+        "estimateTokens",
+        "microCompact",
+        "autoCompact"
+      ],
+      "newTools": [
+        "compact"
+      ],
+      "locDelta": 14
+    },
+    {
+      "from": "s06",
+      "to": "s07",
+      "newClasses": [
+        "TaskManager"
+      ],
+      "newFunctions": [],
+      "newTools": [
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get"
+      ],
+      "locDelta": 9
+    },
+    {
+      "from": "s07",
+      "to": "s08",
+      "newClasses": [
+        "BackgroundManager"
+      ],
+      "newFunctions": [],
+      "newTools": [
+        "background_run",
+        "check_background"
+      ],
+      "locDelta": -37
+    },
+    {
+      "from": "s08",
+      "to": "s09",
+      "newClasses": [
+        "MessageBus",
+        "TeammateManager"
+      ],
+      "newFunctions": [],
+      "newTools": [
+        "default",
+        "alice",
+        "send_message",
+        "read_inbox",
+        "spawn_teammate",
+        "list_teammates",
+        "broadcast"
+      ],
+      "locDelta": 182
+    },
+    {
+      "from": "s09",
+      "to": "s10",
+      "newClasses": [],
+      "newFunctions": [
+        "handleShutdownRequest",
+        "handlePlanReview",
+        "checkShutdownStatus"
+      ],
+      "newTools": [
+        "shutdown_response",
+        "plan_approval",
+        "shutdown_request"
+      ],
+      "locDelta": 70
+    },
+    {
+      "from": "s10",
+      "to": "s11",
+      "newClasses": [],
+      "newFunctions": [
+        "scanUnclaimedTasks",
+        "claimTask",
+        "makeIdentityBlock"
+      ],
+      "newTools": [
+        "idle",
+        "claim_task"
+      ],
+      "locDelta": 100
+    },
+    {
+      "from": "s11",
+      "to": "s12",
+      "newClasses": [
+        "EventBus",
+        "TaskManager",
+        "WorktreeManager"
+      ],
+      "newFunctions": [
+        "detectRepoRoot"
+      ],
+      "newTools": [
+        "task_create",
+        "task_list",
+        "task_get",
+        "task_update",
+        "task_bind_worktree",
+        "worktree_create",
+        "worktree_list",
+        "worktree_status",
+        "worktree_run",
+        "worktree_remove",
+        "worktree_keep",
+        "worktree_events"
+      ],
+      "locDelta": 63
+    }
+  ]
+}

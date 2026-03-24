@@ -4,3 +4,8 @@ dist/
 .env*.local
 bun.lock
 *.tsbuildinfo
+.next/
+out/
+web/node_modules/
+web/.next/
+web/out/
