@@ -216,7 +216,7 @@ function main() {
   const docs: DocContent[] = [];
 
   if (fs.existsSync(DOCS_DIR)) {
-    const localeDirs = ["en", "zh"];
+    const localeDirs = ["en", "zh", "ja"];
     let totalDocFiles = 0;
 
     for (const locale of localeDirs) {
@@ -242,7 +242,7 @@ function main() {
         const titleMatch = content.match(/^#\s+(.+)$/m);
         const title = titleMatch ? titleMatch[1] : filename;
 
-        docs.push({ version, locale: locale as "en" | "zh", title, content });
+        docs.push({ version, locale: locale as "en" | "zh" | "ja", title, content });
       }
     }
 

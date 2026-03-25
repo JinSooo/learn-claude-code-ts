@@ -1,4 +1,4 @@
-[English](./README.md) | [中文](./README-zh.md)
+[English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
 
 # learn-claude-code-ts
 
@@ -55,14 +55,14 @@ cd web && npm install && npm run dev   # http://localhost:3000
 ```
 learn-claude-code-ts/
 ├── agents/          # TypeScript implementations (s01-s12 + s_full)
-├── docs/{en,zh}/    # Documentation (2 languages)
+├── docs/{en,zh,ja}/    # Documentation (3 languages)
 ├── web/             # Interactive learning platform (Next.js 16)
 └── skills/          # Skill files for s05
 ```
 
 ## Documentation
 
-Available in [English](./docs/en/) | [中文](./docs/zh/).
+Available in [English](./docs/en/) | [中文](./docs/zh/) | [日本語](./docs/ja/).
 
 ## Python → TypeScript
 
